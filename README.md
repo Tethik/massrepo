@@ -1,17 +1,6 @@
 # Go template
 
-My own minimalist template for setting up a new Go project.
-
-## Setup 🚀
-
-- [ ] Besides the standard go tooling, ensure you have [goreleaser](https://goreleaser.com/) and `make` installed
-- [ ] Copy the template (e.g. via github)
-- [ ] Modify default code. Find and replace `github.com/Tethik/go-template`. Rename `example`.
-- [ ] Modify `main: ./cmd/example/example.go` and `binary: app` in `.goreleaser.yaml`
-
-### Github release workflow
-
-Ensure you set `Actions -> Workflow permissions` to `Read and write permissions`
+Do security analysis work on all repositories in an org. With or without AI agents.
 
 ## Usage 🧑‍💻
 
@@ -31,8 +20,3 @@ git push origin vX.Y.Z
 Alternatively you can a manual release via make (not tested tbh)
 
 `make release`
-
-### References 📜
-
-- [Repo by @nobe4 which this steals a bunch from](https://github.com/nobe4/safe)
-- [Golang Standards Project Layout](https://github.com/golang-standards/project-layout)

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/Tethik/go-template/internal/shared"
+	"github.com/Tethik/massrepo/internal/shared"
 )
 
 var (

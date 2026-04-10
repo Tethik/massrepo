@@ -1,4 +1,4 @@
-module github.com/Tethik/go-template
+module github.com/Tethik/massrepo
 
 go 1.26.0
 

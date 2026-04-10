@@ -24,9 +24,9 @@ builds:
       - darwin
 
     # main entrypoint of the app
-    main: ./cmd/example/example.go
+    main: ./cmd/massrepo/massrepo.go
     # the name of the binary
-    binary: example
+    binary: massrepo
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
 
