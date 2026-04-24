@@ -339,12 +339,12 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 }
 
 // repoBinds builds Docker bind-mount strings for each repo in a session.
-// Each repo is mounted at /workspace/<org>/<repo> inside the container.
+// Each repo is mounted at /home/node/workspace/<org>/<repo> inside the container.
 func repoBinds(sessionDir string, repos []string) []string {
 	binds := make([]string, len(repos))
 	for i, repo := range repos {
 		hostPath := filepath.Join(sessionDir, "repos", filepath.FromSlash(repo))
-		containerPath := "/workspace/" + repo
+		containerPath := containerHome + "/workspace/" + repo
 		binds[i] = hostPath + ":" + containerPath
 	}
 	return binds
