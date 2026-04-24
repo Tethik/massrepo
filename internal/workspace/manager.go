@@ -130,6 +130,7 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 
 // ensureRepo clones the repo into reposDir if it is not already present.
 // repo must be an "org/name" path matching a GitHub repository.
+// Tries git over SSH first; falls back to gh if git fails.
 func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
 	dst := filepath.Join(m.reposDir, filepath.FromSlash(repo))
 	if _, err := os.Stat(dst); err == nil {
@@ -138,14 +139,22 @@ func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("prepare repo dir for %q: %v", repo, err)
 	}
-	cloneURL := "git@github.com:" + repo + ".git"
 	fmt.Printf("Cloning %s...\n", repo)
+	cloneURL := "git@github.com:" + repo + ".git"
 	cmd := exec.CommandContext(ctx, "git", "clone", "--quiet", cloneURL, dst)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err == nil {
+		return nil
+	}
+	_ = os.RemoveAll(dst)
+	fmt.Printf("git clone failed, retrying with gh...\n")
+	cmd = exec.CommandContext(ctx, "gh", "repo", "clone", repo, dst)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		_ = os.RemoveAll(dst)
-		return fmt.Errorf("clone %q: %v", repo, err)
+		return fmt.Errorf("clone %q: both git and gh failed", repo)
 	}
 	return nil
 }
