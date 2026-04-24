@@ -40,14 +40,14 @@ var rootCmd = &cobra.Command{
 	Long: `massrepo manages sandboxed Docker workspaces for running security analysis,
 patching, and LLM tasks across many repositories simultaneously.
 
-Repositories are stored under the configured repos directory (default: ./repositories)
-and copied into isolated Docker containers called workspaces.`,
+Each workspace holds shared authentication state. Spawning a shell creates an
+independent session with its own copy of the workspace repos.`,
 	Version: fmt.Sprintf("%s (%s) %s", version, commit, date),
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagReposDir, "repos-dir", "./repositories",
-		"path to the repositories directory")
+	rootCmd.PersistentFlags().StringVar(&flagReposDir, "repos-dir", "",
+		"path to the repositories directory (overrides config)")
 	rootCmd.PersistentFlags().StringVar(&flagImagesDir, "images-dir", "./images",
 		"path to the directory containing Dockerfiles")
 	rootCmd.PersistentFlags().StringVar(&flagImage, "image", "massrepo-claude:latest",
@@ -58,7 +58,6 @@ func init() {
 		listCmd,
 		shellCmd,
 		stopCmd,
-		startCmd,
 		rmCmd,
 		duplicateCmd,
 		buildImageCmd,
@@ -66,26 +65,41 @@ func init() {
 	)
 }
 
+// loadConfig loads the application config and exits on error.
+func loadConfig() *config.Config {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	return cfg
+}
+
 // newManager constructs a workspace.Manager using the current flag values.
 func newManager(cfg *config.Config) (*workspace.Manager, error) {
-	var reposDir string
+	reposDir := cfg.RepoPath
 	if flagReposDir != "" {
 		r, err := filepath.Abs(flagReposDir)
 		if err != nil {
-			return nil, fmt.Errorf("resolve repos-dir: %w", err)
+			return nil, fmt.Errorf("resolve repos-dir: %v", err)
 		}
 		reposDir = r
-	} else {
-		reposDir = cfg.RepoPath
 	}
 
 	imagesDir, err := filepath.Abs(flagImagesDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve images-dir: %w", err)
+		return nil, fmt.Errorf("resolve images-dir: %v", err)
 	}
 
 	workspacesDir := filepath.Join(cfg.DataPath, "workspace")
 	return workspace.NewManager(reposDir, workspacesDir, imagesDir, flagImage)
+}
+
+// splitRef splits "workspace/session" into its two parts.
+// If there is no "/" the session part is empty.
+func splitRef(ref string) (ws, session string) {
+	ws, session, _ = strings.Cut(ref, "/")
+	return ws, session
 }
 
 // --- create ---
@@ -93,19 +107,11 @@ func newManager(cfg *config.Config) (*workspace.Manager, error) {
 var createImage string
 
 var createCmd = &cobra.Command{
-	Use:   "create <name> <org/repo> [<org/repo>...]",
-	Short: "Create a new workspace from one or more repositories",
-	Args:  cobra.MinimumNArgs(2),
+	Use:   "create <name>",
+	Short: "Create a new workspace",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name, repos := args[0], args[1:]
-
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
@@ -113,16 +119,14 @@ var createCmd = &cobra.Command{
 		if img == "" {
 			img = flagImage
 		}
-		w, err := m.Create(cmd.Context(), workspace.CreateOptions{
-			Name:  name,
-			Repos: repos,
+		cfg, err := m.Create(cmd.Context(), workspace.CreateOptions{
+			Name:  args[0],
 			Image: img,
 		})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Created workspace %q with %d repo(s) (container: %s)\n",
-			w.Name, len(w.Repos), w.Container[:12])
+		fmt.Printf("Created workspace %q\n", cfg.Name)
 		return nil
 	},
 }
@@ -137,39 +141,37 @@ func init() {
 var listQuiet bool
 
 var listCmd = &cobra.Command{
-	Use:     "list",
+	Use:     "list [workspace]",
 	Aliases: []string{"ls"},
-	Short:   "List all workspaces",
-	Args:    cobra.NoArgs,
+	Short:   "List sessions, optionally filtered to a workspace",
+	Args:    cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		workspaces, err := m.List(cmd.Context())
+		ws := ""
+		if len(args) == 1 {
+			ws = args[0]
+		}
+		sessions, err := m.ListSessions(cmd.Context(), ws)
 		if err != nil {
 			return err
 		}
 		if listQuiet {
-			for _, w := range workspaces {
-				fmt.Println(w.Name)
+			for _, s := range sessions {
+				fmt.Printf("%s/%s\n", s.WorkspaceName, s.ID)
 			}
 			return nil
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tREPOS\tSTATUS\tCREATED")
-		for _, w := range workspaces {
+		fmt.Fprintln(tw, "WORKSPACE\tSESSION\tSTATUS\tCREATED")
+		for _, s := range sessions {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-				w.Name,
-				strings.Join(w.Repos, ", "),
-				w.Status,
-				w.Created.Local().Format(time.DateTime),
+				s.WorkspaceName,
+				s.ID,
+				s.Status,
+				s.Created.Local().Format(time.DateTime),
 			)
 		}
 		return tw.Flush()
@@ -177,7 +179,7 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().BoolVarP(&listQuiet, "quiet", "q", false, "print only names")
+	listCmd.Flags().BoolVarP(&listQuiet, "quiet", "q", false, "print only workspace/session references")
 }
 
 // --- shell ---
@@ -185,21 +187,15 @@ func init() {
 var shellShell string
 
 var shellCmd = &cobra.Command{
-	Use:   "shell <name>",
-	Short: "Open an interactive shell in a workspace",
-	Args:  cobra.ExactArgs(1),
+	Use:   "shell <workspace> <org/repo> [<org/repo>...]",
+	Short: "Create a new session with the given repos and open an interactive shell in it",
+	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		return m.Shell(cmd.Context(), args[0], shellShell)
+		return m.Shell(cmd.Context(), args[0], args[1:], shellShell)
 	},
 }
 
@@ -208,52 +204,23 @@ func init() {
 		"shell executable to run inside the container")
 }
 
-// --- stop ---
-
 var stopCmd = &cobra.Command{
-	Use:   "stop <name>",
-	Short: "Stop a running workspace",
+	Use:   "stop <workspace>/<session>",
+	Short: "Stop a session's container",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
+		ws, sess := splitRef(args[0])
+		if sess == "" {
+			return fmt.Errorf("expected <workspace>/<session>, got %q", args[0])
 		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		if err := m.Stop(cmd.Context(), args[0]); err != nil {
+		if err := m.StopSession(cmd.Context(), ws, sess); err != nil {
 			return err
 		}
-		fmt.Printf("Stopped workspace %q\n", args[0])
-		return nil
-	},
-}
-
-// --- start ---
-
-var startCmd = &cobra.Command{
-	Use:   "start <name>",
-	Short: "Start a stopped workspace",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
-		if err != nil {
-			return err
-		}
-		if err := m.Start(cmd.Context(), args[0]); err != nil {
-			return err
-		}
-		fmt.Printf("Started workspace %q\n", args[0])
+		fmt.Printf("Stopped session %s/%s\n", ws, sess)
 		return nil
 	},
 }
@@ -261,24 +228,26 @@ var startCmd = &cobra.Command{
 // --- rm ---
 
 var rmCmd = &cobra.Command{
-	Use:   "rm <name>",
-	Short: "Remove a workspace and its data",
+	Use:   "rm <workspace>[/<session>]",
+	Short: "Remove a workspace and all its sessions, or a single session",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		ws, sess := splitRef(args[0])
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		if err := m.Remove(cmd.Context(), args[0]); err != nil {
+		if sess != "" {
+			if err := m.RemoveSession(cmd.Context(), ws, sess); err != nil {
+				return err
+			}
+			fmt.Printf("Removed session %s/%s\n", ws, sess)
+			return nil
+		}
+		if err := m.Remove(cmd.Context(), ws); err != nil {
 			return err
 		}
-		fmt.Printf("Removed workspace %q\n", args[0])
+		fmt.Printf("Removed workspace %q\n", ws)
 		return nil
 	},
 }
@@ -287,24 +256,18 @@ var rmCmd = &cobra.Command{
 
 var duplicateCmd = &cobra.Command{
 	Use:   "duplicate <source> <dest>",
-	Short: "Duplicate a workspace into a new independent workspace",
+	Short: "Create a new workspace with the same configuration and image as an existing one",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		w, err := m.Duplicate(cmd.Context(), args[0], args[1])
+		cfg, err := m.Duplicate(cmd.Context(), args[0], args[1])
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Duplicated %q to %q (container: %s)\n", args[0], w.Name, w.Container[:12])
+		fmt.Printf("Duplicated %q to %q\n", args[0], cfg.Name)
 		return nil
 	},
 }
@@ -325,13 +288,7 @@ The Dockerfile is resolved from the image name: "massrepo-claude:latest" uses
 		if len(args) == 1 {
 			imageName = args[0]
 		}
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		m, err := newManager(cfg)
+		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
@@ -344,10 +301,15 @@ The Dockerfile is resolved from the image name: "massrepo-claude:latest" uses
 var openEditor string
 
 var openCmd = &cobra.Command{
-	Use:   "open <name> [<org/repo>]",
-	Short: "Open a workspace or repo in an editor",
-	Args:  cobra.RangeArgs(1, 2),
-	RunE: func(cmd *cobra.Command, args []string) error {
+	Use:   "open <workspace>[/<session>] [<org/repo>]",
+	Short: "Open a workspace or session directory in an editor",
+	Long: `Open a workspace or session directory in an editor.
+
+  open <workspace>                         opens the workspace root
+  open <workspace>/<session>               opens the session repos directory
+  open <workspace>/<session> <org/repo>    opens a specific repo within a session`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(_ *cobra.Command, args []string) error {
 		editor := openEditor
 		if editor == "" {
 			editor = os.Getenv("VISUAL")
@@ -358,24 +320,26 @@ var openCmd = &cobra.Command{
 		if editor == "" {
 			return fmt.Errorf("no editor configured: set --editor, $VISUAL, or $EDITOR")
 		}
-		cfg, err := config.Load()
+
+		m, err := newManager(loadConfig())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 
-		m, err := newManager(cfg)
+		ws, sess := splitRef(args[0])
+		cfg, err := m.Workspace(ws)
 		if err != nil {
 			return err
 		}
-		w, err := m.Get(cmd.Context(), args[0])
-		if err != nil {
-			return err
+
+		target := cfg.WorkDir
+		if sess != "" {
+			target = filepath.Join(cfg.WorkDir, "sessions", sess, "repos")
 		}
-		target := w.WorkDir
 		if len(args) == 2 {
-			target = filepath.Join(w.WorkDir, filepath.FromSlash(args[1]))
+			target = filepath.Join(target, filepath.FromSlash(args[1]))
 		}
+
 		if _, err := os.Stat(target); err != nil {
 			return fmt.Errorf("path does not exist: %s", target)
 		}
