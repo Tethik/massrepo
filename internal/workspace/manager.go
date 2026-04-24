@@ -100,24 +100,24 @@ func (m *Manager) Workspace(workspaceName string) (WorkspaceConfig, error) {
 
 // Shell creates a new session for the workspace and opens an interactive shell inside it.
 // repos lists the relative repo paths to copy into the session.
-// The session's container keeps running after the shell exits.
-func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []string, shell string) error {
+// Returns the session ID so the caller can decide what to do after the shell exits.
+func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []string, shell string) (string, error) {
 	if len(repos) == 0 {
-		return fmt.Errorf("at least one repo is required")
+		return "", fmt.Errorf("at least one repo is required")
 	}
 	cfg, err := m.Workspace(workspaceName)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, repo := range repos {
 		if err := m.ensureRepo(ctx, repo); err != nil {
-			return err
+			return "", err
 		}
 	}
 	fmt.Printf("Creating session in workspace %q with %d repo(s)...\n", workspaceName, len(repos))
 	s, err := m.newSession(ctx, cfg, repos)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fmt.Printf("Session %s ready. Opening shell...\n", s.ID)
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-it",
@@ -125,7 +125,7 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return s.ID, cmd.Run()
 }
 
 // ensureRepo clones the repo into reposDir if it is not already present.
@@ -355,6 +355,7 @@ func dataBinds(workDir string) []string {
 	dataDir := filepath.Join(workDir, "data")
 	return []string{
 		filepath.Join(dataDir, "claude") + ":" + containerHome + "/.claude",
+		filepath.Join(dataDir, "claude.json") + ":" + containerHome + "/.claude.json",
 		filepath.Join(dataDir, "gh") + ":" + containerHome + "/.config/gh",
 		filepath.Join(dataDir, "git") + ":" + containerHome + "/.config/git",
 		filepath.Join(dataDir, "ssh") + ":" + containerHome + "/.ssh",
@@ -449,6 +450,14 @@ func createWorkspaceDirs(workDir string) error {
 	for _, d := range dirs {
 		if err := os.MkdirAll(d.path, d.mode); err != nil {
 			return fmt.Errorf("create workspace dir %s: %v", d.path, err)
+		}
+	}
+	// claude.json is a file bind-mount; Docker creates missing bind sources as
+	// root-owned directories, so we must ensure the file exists beforehand.
+	claudeJSON := filepath.Join(workDir, "data", "claude.json")
+	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
+		if err := os.WriteFile(claudeJSON, []byte("{}"), 0o644); err != nil {
+			return fmt.Errorf("create claude.json: %v", err)
 		}
 	}
 	return nil

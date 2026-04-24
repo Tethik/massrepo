@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -102,6 +103,17 @@ func newManager(cfg *config.Config) (*workspace.Manager, error) {
 func splitRef(ref string) (ws, session string) {
 	ws, session, _ = strings.Cut(ref, "/")
 	return ws, session
+}
+
+// confirm prints prompt and returns true if the user answers "y" or "yes".
+func confirm(prompt string) bool {
+	fmt.Printf("%s [y/N] ", prompt)
+	s := bufio.NewScanner(os.Stdin)
+	if !s.Scan() {
+		return false
+	}
+	answer := strings.ToLower(strings.TrimSpace(s.Text()))
+	return answer == "y" || answer == "yes"
 }
 
 // --- create ---
@@ -220,7 +232,18 @@ var shellCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return m.Shell(cmd.Context(), args[0], repos, shellShell)
+		ws := args[0]
+		sessionID, err := m.Shell(cmd.Context(), ws, repos, shellShell)
+		if err != nil {
+			return err
+		}
+		if confirm("Remove session?") {
+			if err := m.RemoveSession(cmd.Context(), ws, sessionID); err != nil {
+				return err
+			}
+			fmt.Printf("Removed session %s/%s\n", ws, sessionID)
+		}
+		return nil
 	},
 }
 
@@ -230,22 +253,43 @@ func init() {
 }
 
 var stopCmd = &cobra.Command{
-	Use:   "stop <workspace>/<session>",
-	Short: "Stop a session's container",
+	Use:   "stop <workspace>[/<session>]",
+	Short: "Stop a session's container, or all sessions in a workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ws, sess := splitRef(args[0])
-		if sess == "" {
-			return fmt.Errorf("expected <workspace>/<session>, got %q", args[0])
-		}
 		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
 		}
-		if err := m.StopSession(cmd.Context(), ws, sess); err != nil {
+		if sess != "" {
+			if err := m.StopSession(cmd.Context(), ws, sess); err != nil {
+				return err
+			}
+			fmt.Printf("Stopped session %s/%s\n", ws, sess)
+			return nil
+		}
+		sessions, err := m.ListSessions(cmd.Context(), ws)
+		if err != nil {
 			return err
 		}
-		fmt.Printf("Stopped session %s/%s\n", ws, sess)
+		if len(sessions) == 0 {
+			fmt.Printf("No running sessions for workspace %q\n", ws)
+			return nil
+		}
+		fmt.Printf("Workspace %q has %d session(s):\n", ws, len(sessions))
+		for _, s := range sessions {
+			fmt.Printf("  %s (%s)\n", s.ID, s.Status)
+		}
+		if !confirm(fmt.Sprintf("Stop all %d session(s)?", len(sessions))) {
+			return nil
+		}
+		for _, s := range sessions {
+			if err := m.StopSession(cmd.Context(), ws, s.ID); err != nil {
+				return err
+			}
+			fmt.Printf("Stopped session %s/%s\n", ws, s.ID)
+		}
 		return nil
 	},
 }
