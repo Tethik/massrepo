@@ -22,16 +22,6 @@ var (
 )
 
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-		os.Exit(1)
-	}
-
-	if cfg.RepoPath != "" {
-		flagReposDir = cfg.RepoPath
-	}
-
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -77,20 +67,24 @@ func init() {
 }
 
 // newManager constructs a workspace.Manager using the current flag values.
-func newManager() (*workspace.Manager, error) {
-	reposDir, err := filepath.Abs(flagReposDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve repos-dir: %w", err)
+func newManager(cfg *config.Config) (*workspace.Manager, error) {
+	var reposDir string
+	if flagReposDir != "" {
+		r, err := filepath.Abs(flagReposDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repos-dir: %w", err)
+		}
+		reposDir = r
+	} else {
+		reposDir = cfg.RepoPath
 	}
+
 	imagesDir, err := filepath.Abs(flagImagesDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve images-dir: %w", err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("home dir: %w", err)
-	}
-	workspacesDir := filepath.Join(home, ".massrepo", "workspaces")
+
+	workspacesDir := filepath.Join(cfg.DataPath, "workspace")
 	return workspace.NewManager(reposDir, workspacesDir, imagesDir, flagImage)
 }
 
@@ -104,7 +98,14 @@ var createCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name, repos := args[0], args[1:]
-		m, err := newManager()
+
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -141,7 +142,13 @@ var listCmd = &cobra.Command{
 	Short:   "List all workspaces",
 	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -182,7 +189,13 @@ var shellCmd = &cobra.Command{
 	Short: "Open an interactive shell in a workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -202,7 +215,13 @@ var stopCmd = &cobra.Command{
 	Short: "Stop a running workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -221,7 +240,13 @@ var startCmd = &cobra.Command{
 	Short: "Start a stopped workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -240,7 +265,13 @@ var rmCmd = &cobra.Command{
 	Short: "Remove a workspace and its data",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -259,7 +290,13 @@ var duplicateCmd = &cobra.Command{
 	Short: "Duplicate a workspace into a new independent workspace",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -288,7 +325,13 @@ The Dockerfile is resolved from the image name: "massrepo-claude:latest" uses
 		if len(args) == 1 {
 			imageName = args[0]
 		}
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -315,7 +358,13 @@ var openCmd = &cobra.Command{
 		if editor == "" {
 			return fmt.Errorf("no editor configured: set --editor, $VISUAL, or $EDITOR")
 		}
-		m, err := newManager()
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}

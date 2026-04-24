@@ -18,6 +18,9 @@ import (
 	"github.com/docker/docker/client"
 )
 
+// containerHome is the home directory of the container user defined in the image.
+const containerHome = "/home/node"
+
 // Manager orchestrates workspace lifecycle against a Docker daemon.
 type Manager struct {
 	docker        *client.Client
@@ -84,13 +87,13 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (Workspace, er
 	}
 
 	workDir := filepath.Join(m.workspacesDir, opts.Name)
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return Workspace{}, fmt.Errorf("create workspace dir: %w", err)
+	if err := createWorkspaceDirs(workDir); err != nil {
+		return Workspace{}, err
 	}
 
 	for _, repo := range opts.Repos {
 		src := filepath.Join(m.reposDir, filepath.FromSlash(repo))
-		dst := filepath.Join(workDir, filepath.FromSlash(repo))
+		dst := filepath.Join(workDir, "repos", filepath.FromSlash(repo))
 		if err := copyDir(src, dst); err != nil {
 			_ = os.RemoveAll(workDir)
 			return Workspace{}, fmt.Errorf("copy repo %q: %w", repo, err)
@@ -112,11 +115,11 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (Workspace, er
 			Image:      image,
 			Entrypoint: []string{"sleep", "infinity"},
 			User:       hostUser(),
-			Env:        sshEnv,
+			Env:        append(sshEnv, "HOME="+containerHome),
 			Labels:     labelsForWorkspace(w),
 		},
 		&container.HostConfig{
-			Binds: append(repoBinds(workDir, opts.Repos), sshBinds...),
+			Binds: append(append(repoBinds(workDir, opts.Repos), dataBinds(workDir)...), sshBinds...),
 		},
 		&network.NetworkingConfig{},
 		nil,
@@ -143,11 +146,22 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (Workspace, er
 func repoBinds(workDir string, repos []string) []string {
 	binds := make([]string, len(repos))
 	for i, repo := range repos {
-		hostPath := filepath.Join(workDir, filepath.FromSlash(repo))
+		hostPath := filepath.Join(workDir, "repos", filepath.FromSlash(repo))
 		containerPath := "/workspace/" + repo
 		binds[i] = hostPath + ":" + containerPath
 	}
 	return binds
+}
+
+// dataBinds builds the Docker bind-mount strings for persistent tool data.
+// Each data subdirectory is mounted to the corresponding tool config path inside the container.
+func dataBinds(workDir string) []string {
+	dataDir := filepath.Join(workDir, "data")
+	return []string{
+		filepath.Join(dataDir, "claude") + ":" + containerHome + "/.claude",
+		filepath.Join(dataDir, "git") + ":" + containerHome + "/.config/git",
+		filepath.Join(dataDir, "ssh") + ":" + containerHome + "/.ssh",
+	}
 }
 
 // hostUser returns a "uid:gid" string for the current process so containers
@@ -298,13 +312,15 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 	_ = commitResp // ID available if needed for cleanup
 
 	destWorkDir := filepath.Join(m.workspacesDir, destName)
-	if err := os.MkdirAll(destWorkDir, 0o755); err != nil {
-		return Workspace{}, fmt.Errorf("create dest dir: %w", err)
+	if err := createWorkspaceDirs(destWorkDir); err != nil {
+		return Workspace{}, err
 	}
 
-	if err := copyDir(src.WorkDir, destWorkDir); err != nil {
+	srcRepos := filepath.Join(src.WorkDir, "repos")
+	dstRepos := filepath.Join(destWorkDir, "repos")
+	if err := copyDir(srcRepos, dstRepos); err != nil {
 		_ = os.RemoveAll(destWorkDir)
-		return Workspace{}, fmt.Errorf("copy workspace dir: %w", err)
+		return Workspace{}, fmt.Errorf("copy workspace repos: %w", err)
 	}
 
 	now := time.Now()
@@ -322,11 +338,11 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 			Image:      snapshotTag,
 			Entrypoint: []string{"sleep", "infinity"},
 			User:       hostUser(),
-			Env:        sshEnv,
+			Env:        append(sshEnv, "HOME="+containerHome),
 			Labels:     labelsForWorkspace(dest),
 		},
 		&container.HostConfig{
-			Binds: append(repoBinds(destWorkDir, src.Repos), sshBinds...),
+			Binds: append(append(repoBinds(destWorkDir, src.Repos), dataBinds(destWorkDir)...), sshBinds...),
 		},
 		&network.NetworkingConfig{},
 		nil,
@@ -422,6 +438,25 @@ func (m *Manager) ensureRunning(ctx context.Context, containerID string) error {
 	}
 	if err := m.docker.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("start container: %w", err)
+	}
+	return nil
+}
+
+// createWorkspaceDirs creates the standard subdirectory layout for a workspace.
+func createWorkspaceDirs(workDir string) error {
+	dirs := []struct {
+		path string
+		mode os.FileMode
+	}{
+		{filepath.Join(workDir, "repos"), 0o755},
+		{filepath.Join(workDir, "data", "claude"), 0o755},
+		{filepath.Join(workDir, "data", "git"), 0o755},
+		{filepath.Join(workDir, "data", "ssh"), 0o700},
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d.path, d.mode); err != nil {
+			return fmt.Errorf("create workspace dir %s: %w", d.path, err)
+		}
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 // Config holds the application configuration loaded from disk.
 type Config struct {
 	RepoPath string `mapstructure:"repo_path"`
+	DataPath string `mapstructure:"data_path"`
 }
 
 // Load reads ~/.config/massrepo/config.yaml, creating it with defaults if absent.
@@ -26,7 +27,8 @@ func Load() (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
-	v.SetDefault("repo_path", filepath.Join(home, "repositories"))
+	v.SetDefault("repo_path", filepath.Join(home, "repos"))
+	v.SetDefault("data_path", filepath.Join(home, ".massrepo"))
 
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create config directory: %v", err)
