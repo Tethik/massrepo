@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Tethik/massrepo/internal/config"
+	"github.com/Tethik/massrepo/internal/groups"
 	"github.com/Tethik/massrepo/internal/workspace"
 )
 
@@ -186,16 +188,39 @@ func init() {
 
 var shellShell string
 
+// expandRefs resolves group references; plain org/repo paths pass through unchanged.
+func expandRefs(ctx context.Context, r groups.Resolver, refs []string) ([]string, error) {
+	var repos []string
+	for _, ref := range refs {
+		if groups.IsGroupRef(ref) {
+			resolved, err := r.Resolve(ctx, ref)
+			if err != nil {
+				return nil, fmt.Errorf("resolve %q: %v", ref, err)
+			}
+			repos = append(repos, resolved...)
+		} else {
+			repos = append(repos, ref)
+		}
+	}
+	return repos, nil
+}
+
 var shellCmd = &cobra.Command{
-	Use:   "shell <workspace> <org/repo> [<org/repo>...]",
+	Use:   "shell <workspace> <org/repo|group:name> [<org/repo|group:name>...]",
 	Short: "Create a new session with the given repos and open an interactive shell in it",
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager(loadConfig())
+		cfg := loadConfig()
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
-		return m.Shell(cmd.Context(), args[0], args[1:], shellShell)
+		resolver := groups.New(cfg.Groups, cfg.BackstageURL, cfg.BackstageToken)
+		repos, err := expandRefs(cmd.Context(), resolver, args[1:])
+		if err != nil {
+			return err
+		}
+		return m.Shell(cmd.Context(), args[0], repos, shellShell)
 	},
 }
 

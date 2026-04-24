@@ -10,8 +10,11 @@ import (
 
 // Config holds the application configuration loaded from disk.
 type Config struct {
-	RepoPath string `mapstructure:"repo_path"`
-	DataPath string `mapstructure:"data_path"`
+	RepoPath       string                         `mapstructure:"repo_path"`
+	DataPath       string                         `mapstructure:"data_path"`
+	BackstageURL   string                         `mapstructure:"backstage_url"`
+	BackstageToken string                         `mapstructure:"backstage_token"`
+	Groups         map[string]map[string][]string `mapstructure:"groups"`
 }
 
 // Load reads ~/.config/massrepo/config.yaml, creating it with defaults if absent.

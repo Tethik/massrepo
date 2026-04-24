@@ -110,21 +110,44 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 		return err
 	}
 	for _, repo := range repos {
-		src := filepath.Join(m.reposDir, filepath.FromSlash(repo))
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			return fmt.Errorf("repo %q not found in %s", repo, m.reposDir)
+		if err := m.ensureRepo(ctx, repo); err != nil {
+			return err
 		}
 	}
+	fmt.Printf("Creating session in workspace %q with %d repo(s)...\n", workspaceName, len(repos))
 	s, err := m.newSession(ctx, cfg, repos)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Session %s ready. Opening shell...\n", s.ID)
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-it",
 		containerName(workspaceName, s.ID), shell)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// ensureRepo clones the repo into reposDir if it is not already present.
+// repo must be an "org/name" path matching a GitHub repository.
+func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
+	dst := filepath.Join(m.reposDir, filepath.FromSlash(repo))
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("prepare repo dir for %q: %v", repo, err)
+	}
+	cloneURL := "git@github.com:" + repo + ".git"
+	fmt.Printf("Cloning %s...\n", repo)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--quiet", cloneURL, dst)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		_ = os.RemoveAll(dst)
+		return fmt.Errorf("clone %q: %v", repo, err)
+	}
+	return nil
 }
 
 // newSession creates a session for the given workspace: copies repos, starts a container.
@@ -140,6 +163,7 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 	}
 
 	for _, repo := range repos {
+		fmt.Printf("Copying %s...\n", repo)
 		src := filepath.Join(m.reposDir, filepath.FromSlash(repo))
 		dst := filepath.Join(sessionDir, "repos", filepath.FromSlash(repo))
 		if err := copyDir(src, dst); err != nil {
@@ -433,6 +457,8 @@ func copyDir(src, dst string) error {
 }
 
 // copyFile copies a single file from src to dst, preserving permissions.
+// The file is created with owner-write to avoid failures on read-only sources
+// (e.g. git pack files at 0444); permissions are restored after writing.
 func copyFile(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -444,12 +470,17 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode()|0o200)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, in)
-	return err
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dst, info.Mode())
 }
