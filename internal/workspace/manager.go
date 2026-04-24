@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -298,13 +299,14 @@ func (m *Manager) RemoveSession(ctx context.Context, workspaceName, sessionID st
 // removeSession is the internal implementation for removing a single session.
 func (m *Manager) removeSession(ctx context.Context, s Session) error {
 	_ = m.docker.ContainerStop(ctx, s.Container, container.StopOptions{})
-	if err := m.docker.ContainerRemove(ctx, s.Container, container.RemoveOptions{}); err != nil {
-		return fmt.Errorf("remove container: %v", err)
+	var containerErr error
+	if err := m.docker.ContainerRemove(ctx, s.Container, container.RemoveOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
+		containerErr = fmt.Errorf("remove container: %v", err)
 	}
 	if err := os.RemoveAll(s.SessionDir); err != nil {
-		return fmt.Errorf("remove session dir: %v", err)
+		return errors.Join(containerErr, fmt.Errorf("remove session dir: %v", err))
 	}
-	return nil
+	return containerErr
 }
 
 // Remove stops and removes all sessions for the workspace, then deletes the workspace directory.
