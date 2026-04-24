@@ -1,0 +1,50 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/viper"
+)
+
+// Config holds the application configuration loaded from disk.
+type Config struct {
+	RepoPath string `mapstructure:"repo_path"`
+}
+
+// Load reads ~/.config/massrepo/config.yaml, creating it with defaults if absent.
+func Load() (*Config, error) {
+	home, ok := os.LookupEnv("HOME")
+	if !ok {
+		return nil, fmt.Errorf("HOME environment variable not set")
+	}
+
+	configDir := filepath.Join(home, ".config", "massrepo")
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	v := viper.New()
+	v.SetConfigFile(configPath)
+	v.SetConfigType("yaml")
+	v.SetDefault("repo_path", filepath.Join(home, "repositories"))
+
+	if err := os.MkdirAll(configDir, 0o750); err != nil {
+		return nil, fmt.Errorf("create config directory: %v", err)
+	}
+
+	if err := v.ReadInConfig(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read config: %v", err)
+		}
+		if err := v.WriteConfigAs(configPath); err != nil {
+			return nil, fmt.Errorf("write default config: %v", err)
+		}
+	}
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %v", err)
+	}
+
+	return &cfg, nil
+}

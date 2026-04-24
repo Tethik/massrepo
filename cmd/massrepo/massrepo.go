@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Tethik/massrepo/internal/config"
 	"github.com/Tethik/massrepo/internal/workspace"
 )
 
@@ -21,6 +22,16 @@ var (
 )
 
 func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	if cfg.RepoPath != "" {
+		flagReposDir = cfg.RepoPath
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
