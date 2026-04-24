@@ -161,6 +161,11 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 	if err := os.MkdirAll(filepath.Join(sessionDir, "repos"), 0o755); err != nil {
 		return Session{}, fmt.Errorf("create session dir: %v", err)
 	}
+	// Ensure all data dirs exist before the container starts — Docker creates
+	// missing bind-mount sources as root, which makes them unwritable in the container.
+	if err := createWorkspaceDirs(cfg.WorkDir); err != nil {
+		return Session{}, fmt.Errorf("ensure workspace dirs: %v", err)
+	}
 
 	for _, repo := range repos {
 		fmt.Printf("Copying %s...\n", repo)
@@ -341,6 +346,7 @@ func dataBinds(workDir string) []string {
 	dataDir := filepath.Join(workDir, "data")
 	return []string{
 		filepath.Join(dataDir, "claude") + ":" + containerHome + "/.claude",
+		filepath.Join(dataDir, "gh") + ":" + containerHome + "/.config/gh",
 		filepath.Join(dataDir, "git") + ":" + containerHome + "/.config/git",
 		filepath.Join(dataDir, "ssh") + ":" + containerHome + "/.ssh",
 	}
@@ -427,6 +433,7 @@ func createWorkspaceDirs(workDir string) error {
 	}{
 		{filepath.Join(workDir, "sessions"), 0o755},
 		{filepath.Join(workDir, "data", "claude"), 0o755},
+		{filepath.Join(workDir, "data", "gh"), 0o755},
 		{filepath.Join(workDir, "data", "git"), 0o755},
 		{filepath.Join(workDir, "data", "ssh"), 0o700},
 	}
