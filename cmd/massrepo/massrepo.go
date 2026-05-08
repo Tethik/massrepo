@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -64,7 +63,7 @@ func init() {
 		rmCmd,
 		duplicateCmd,
 		buildImageCmd,
-		openCmd,
+		pathCmd,
 	)
 }
 
@@ -371,31 +370,20 @@ The Dockerfile is resolved from the image name: "massrepo-claude:latest" uses
 	},
 }
 
-// --- open ---
+// --- path ---
 
-var openEditor string
+var pathCmd = &cobra.Command{
+	Use:   "path <workspace>[/<session>] [<org/repo>]",
+	Short: "Print the host path of a workspace, session, or repo within a session",
+	Long: `Print the host path of a workspace, session, or repo within a session.
 
-var openCmd = &cobra.Command{
-	Use:   "open <workspace>[/<session>] [<org/repo>]",
-	Short: "Open a workspace or session directory in an editor",
-	Long: `Open a workspace or session directory in an editor.
+  path <workspace>                         workspace root
+  path <workspace>/<session>               session workspace directory
+  path <workspace>/<session> <org/repo>    a specific repo within a session
 
-  open <workspace>                         opens the workspace root
-  open <workspace>/<session>               opens the session workspace directory
-  open <workspace>/<session> <org/repo>    opens a specific repo within a session`,
+Useful for piping into editors or shells, e.g. "cd $(massrepo path my-ws/abc123)".`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(_ *cobra.Command, args []string) error {
-		editor := openEditor
-		if editor == "" {
-			editor = os.Getenv("VISUAL")
-		}
-		if editor == "" {
-			editor = os.Getenv("EDITOR")
-		}
-		if editor == "" {
-			return fmt.Errorf("no editor configured: set --editor, $VISUAL, or $EDITOR")
-		}
-
 		m, err := newManager(loadConfig())
 		if err != nil {
 			return err
@@ -418,13 +406,7 @@ var openCmd = &cobra.Command{
 		if _, err := os.Stat(target); err != nil {
 			return fmt.Errorf("path does not exist: %s", target)
 		}
-		c := exec.Command(editor, target)
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-		return c.Run()
+		fmt.Println(target)
+		return nil
 	},
-}
-
-func init() {
-	openCmd.Flags().StringVar(&openEditor, "editor", "", "editor command to use (overrides $VISUAL/$EDITOR)")
 }

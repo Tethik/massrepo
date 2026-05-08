@@ -24,6 +24,9 @@ import (
 //go:embed session_readme.md
 var sessionReadme []byte
 
+//go:embed session_claude.md
+var sessionClaudeTemplate string
+
 // containerHome is the home directory of the container user defined in the image.
 const containerHome = "/home/node"
 
@@ -155,6 +158,21 @@ func setTerminalTitle(title string) func() {
 	}
 }
 
+// renderSessionClaude fills in the {{REPOS}} placeholder in the embedded
+// CLAUDE.md template with a bullet list of repo paths inside the container.
+func renderSessionClaude(repos []string) string {
+	var list strings.Builder
+	if len(repos) == 0 {
+		list.WriteString("\n_None — this session was started without any repos._\n")
+	} else {
+		list.WriteString("\n")
+		for _, r := range repos {
+			fmt.Fprintf(&list, "- `%s/%s`\n", containerWorkspace, r)
+		}
+	}
+	return strings.Replace(sessionClaudeTemplate, "{{REPOS}}", list.String(), 1)
+}
+
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {
@@ -173,6 +191,9 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 	}
 	if err := os.WriteFile(filepath.Join(workspaceDir, "README.md"), sessionReadme, 0o644); err != nil {
 		return Session{}, fmt.Errorf("write session README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "CLAUDE.md"), []byte(renderSessionClaude(repos)), 0o644); err != nil {
+		return Session{}, fmt.Errorf("write session CLAUDE.md: %v", err)
 	}
 	// Ensure all data dirs exist before the container starts — Docker creates
 	// missing bind-mount sources as root, which makes them unwritable in the container.

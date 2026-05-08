@@ -85,9 +85,9 @@ massrepo shell my-workspace system:booking-api org/some-other-repo
 massrepo list
 massrepo list my-workspace   # filter to one workspace
 
-# 5. Open a session's repos in your editor
-massrepo open my-workspace/20260424-143200
-massrepo open my-workspace/20260424-143200 org/repo1
+# 5. Get the host path of a session's workspace dir (pipe into your editor)
+massrepo path my-workspace/20260424-143200
+$EDITOR $(massrepo path my-workspace/20260424-143200 org/repo1)
 ```
 
 ## Commands
@@ -180,15 +180,20 @@ massrepo build-image
 massrepo build-image massrepo-claude:latest
 ```
 
-### `massrepo open <workspace>[/<session>] [<org/repo>]`
+### `massrepo path <workspace>[/<session>] [<org/repo>]`
 
-Open a workspace or session directory in your editor. Resolves from `--editor`, `$VISUAL`, or `$EDITOR`.
+Print the host path of a workspace, session, or repo within a session. Useful for piping into editors or shells.
 
 ```sh
-massrepo open my-workspace
-massrepo open my-workspace/20260424-143200
-massrepo open my-workspace/20260424-143200 org/repo1
-massrepo open --editor cursor my-workspace
+massrepo path my-workspace                              # workspace root
+massrepo path my-workspace/20260424-143200              # session workspace dir
+massrepo path my-workspace/20260424-143200 org/repo1    # specific repo
+
+# Open it in your editor
+$EDITOR $(massrepo path my-workspace/20260424-143200)
+
+# cd into it
+cd $(massrepo path my-workspace/20260424-143200)
 ```
 
 ## Global Flags
