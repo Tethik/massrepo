@@ -19,12 +19,22 @@ Run security analysis, patching, and LLM tasks across many repositories at scale
 - [`gh`](https://cli.github.com/) — GitHub CLI, authenticated (`gh auth login`)
 - SSH key with GitHub access (for cloning)
 
+## Installing
+
+```sh
+go install github.com/Tethik/massrepo/cmd/massrepo@latest
+```
+
+Installs the latest tagged release into `$GOBIN` (defaults to `~/go/bin` —
+make sure it's on your `$PATH`).
+
 ## Building
 
 ```sh
-make          # build for your arch, outputs to dist/
-make build    # build for all architectures
-make test     # run tests
+make           # build for your arch, outputs to dist/
+make build     # build for all architectures
+make install   # go install ./cmd/massrepo into $GOBIN
+make test      # run tests
 ```
 
 ## Configuration

@@ -16,4 +16,7 @@ endif
 test:
 	go test ./...
 
-.PHONY: lint test release single-build
+install:
+	go install ./cmd/massrepo
+
+.PHONY: lint test release single-build install
