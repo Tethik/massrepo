@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 )
 
 // containerHome is the home directory of the container user defined in the image.
@@ -168,12 +169,8 @@ func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
 
 // newSession creates a session for the given workspace: copies repos, starts a container.
 func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []string) (Session, error) {
-	sessionID := time.Now().Format("20060102-150405")
+	sessionID := uuid.NewString()
 	sessionDir := filepath.Join(cfg.WorkDir, "sessions", sessionID)
-
-	if _, err := os.Stat(sessionDir); err == nil {
-		return Session{}, fmt.Errorf("session %q already exists for workspace %q", sessionID, cfg.Name)
-	}
 	if err := os.MkdirAll(filepath.Join(sessionDir, "repos"), 0o755); err != nil {
 		return Session{}, fmt.Errorf("create session dir: %v", err)
 	}
