@@ -1,3 +1,6 @@
+# WIP ⚠️
+This tool is a prototype - not ready for general use. 
+
 # massrepo
 
 Run security analysis, patching, and LLM tasks across many repositories at scale using sandboxed Docker workspaces.
