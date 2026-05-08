@@ -22,6 +22,12 @@ import (
 // containerHome is the home directory of the container user defined in the image.
 const containerHome = "/home/node"
 
+// containerWorkspace is the top-level directory inside the container where
+// session repos are bind-mounted. It deliberately lives outside containerHome
+// so the home directory can itself be a single bind mount without colliding
+// with per-repo mount targets.
+const containerWorkspace = "/workspace"
+
 // Manager orchestrates workspace and session lifecycle against a Docker daemon.
 type Manager struct {
 	docker        *client.Client
@@ -199,7 +205,7 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 		},
 		&container.HostConfig{
 			Binds: append(
-				append(repoBinds(sessionDir, repos), dataBinds(cfg.WorkDir)...),
+				append(repoBinds(sessionDir, repos), homeBind(cfg.WorkDir)),
 				sshBinds...,
 			),
 		},
@@ -341,27 +347,22 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 }
 
 // repoBinds builds Docker bind-mount strings for each repo in a session.
-// Each repo is mounted at /home/node/workspace/<org>/<repo> inside the container.
+// Each repo is mounted at /workspace/<org>/<repo> inside the container.
 func repoBinds(sessionDir string, repos []string) []string {
 	binds := make([]string, len(repos))
 	for i, repo := range repos {
 		hostPath := filepath.Join(sessionDir, "repos", filepath.FromSlash(repo))
-		containerPath := containerHome + "/workspace/" + repo
+		containerPath := containerWorkspace + "/" + repo
 		binds[i] = hostPath + ":" + containerPath
 	}
 	return binds
 }
 
-// dataBinds builds Docker bind-mount strings for the workspace's shared persistent tool data.
-func dataBinds(workDir string) []string {
-	dataDir := filepath.Join(workDir, "data")
-	return []string{
-		filepath.Join(dataDir, "claude") + ":" + containerHome + "/.claude",
-		filepath.Join(dataDir, "claude.json") + ":" + containerHome + "/.claude.json",
-		filepath.Join(dataDir, "gh") + ":" + containerHome + "/.config/gh",
-		filepath.Join(dataDir, "git") + ":" + containerHome + "/.config/git",
-		filepath.Join(dataDir, "ssh") + ":" + containerHome + "/.ssh",
-	}
+// homeBind returns a single bind mount for the workspace's persistent home
+// directory. Mounting the whole home dir (rather than individual files like
+// .claude.json) avoids inode-pinning issues with atomic file rewrites.
+func homeBind(workDir string) string {
+	return filepath.Join(workDir, "home") + ":" + containerHome
 }
 
 // hostUser returns a "uid:gid" string for the current process so containers
@@ -444,22 +445,12 @@ func createWorkspaceDirs(workDir string) error {
 		mode os.FileMode
 	}{
 		{filepath.Join(workDir, "sessions"), 0o755},
-		{filepath.Join(workDir, "data", "claude"), 0o755},
-		{filepath.Join(workDir, "data", "gh"), 0o755},
-		{filepath.Join(workDir, "data", "git"), 0o755},
-		{filepath.Join(workDir, "data", "ssh"), 0o700},
+		{filepath.Join(workDir, "home"), 0o755},
+		{filepath.Join(workDir, "home", ".ssh"), 0o700},
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d.path, d.mode); err != nil {
 			return fmt.Errorf("create workspace dir %s: %v", d.path, err)
-		}
-	}
-	// claude.json is a file bind-mount; Docker creates missing bind sources as
-	// root-owned directories, so we must ensure the file exists beforehand.
-	claudeJSON := filepath.Join(workDir, "data", "claude.json")
-	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
-		if err := os.WriteFile(claudeJSON, []byte("{}"), 0o644); err != nil {
-			return fmt.Errorf("create claude.json: %v", err)
 		}
 	}
 	return nil
