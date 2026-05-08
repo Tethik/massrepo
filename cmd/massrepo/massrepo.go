@@ -233,6 +233,12 @@ var shellCmd = &cobra.Command{
 			return err
 		}
 		ws := args[0]
+		const largeRepoSetThreshold = 20
+		if len(repos) > largeRepoSetThreshold {
+			if !confirm(fmt.Sprintf("This will prepare %d repos. Continue?", len(repos))) {
+				return nil
+			}
+		}
 		sessionID, err := m.Shell(cmd.Context(), ws, repos, shellShell)
 		if err != nil {
 			return err

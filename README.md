@@ -10,7 +10,7 @@ Run security analysis, patching, and LLM tasks across many repositories at scale
 
 **Repo cache** — repositories are cloned on demand from GitHub into `~/repos` (configurable) and reused across sessions. Think of it as a local mirror, not a working copy.
 
-**Groups** — logical collections of repositories referenced by `team:<name>` or `system:<name>`. Groups can be defined statically in config or resolved dynamically from a Backstage catalog.
+**Groups** — logical collections of repositories referenced by `kind:name`. Groups can be defined statically in config (`team:<name>`, `system:<name>`), resolved dynamically from a Backstage catalog, or expanded from GitHub via the `gh` CLI (`org:<name>`, `user:<name>`).
 
 ## Prerequisites
 
@@ -63,6 +63,10 @@ massrepo shell my-workspace org/repo1 org/repo2
 massrepo shell my-workspace team:my-team
 massrepo shell my-workspace system:booking-api
 
+# Pull every repo owned by a GitHub org or user (via gh CLI):
+massrepo shell my-workspace org:my-org
+massrepo shell my-workspace user:my-handle
+
 # Mix explicit repos and groups:
 massrepo shell my-workspace system:booking-api org/some-other-repo
 
@@ -101,6 +105,24 @@ massrepo shell my-workspace org/my-repo --shell /bin/sh
 ```
 
 Repos are mounted inside the container at `/workspace/<org>/<repo>`.
+
+#### Group references
+
+| Form                | Resolves via       | Notes                                    |
+|---------------------|--------------------|------------------------------------------|
+| `team:<name>`       | static / Backstage | Configured map or Backstage owner filter |
+| `system:<name>`     | static / Backstage | Configured map or Backstage system       |
+| `org:<name>`        | `gh` CLI           | All repos owned by a GitHub org          |
+| `user:<name>`       | `gh` CLI           | All repos owned by a GitHub user         |
+
+`org:` and `user:` exclude archived repos and forks by default. Append
+modifiers (separated by `+`) to relax the filter:
+
+```sh
+massrepo shell my-ws org:my-org+archived   # include archived repos
+massrepo shell my-ws org:my-org+forks      # include forks
+massrepo shell my-ws org:my-org+all        # include both
+```
 
 ### `massrepo list [workspace]`
 

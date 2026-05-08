@@ -2,6 +2,7 @@ package groups
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,12 @@ import (
 type Resolver interface {
 	Resolve(ctx context.Context, ref string) ([]string, error)
 }
+
+// ErrUnhandled is returned by a Resolver when the ref is outside its
+// vocabulary (e.g. an unknown kind, or a kind handled by another resolver).
+// chainResolver uses this to skip the resolver and try the next one,
+// instead of treating the error as a real failure.
+var ErrUnhandled = errors.New("ref not handled by this resolver")
 
 // IsGroupRef reports whether s is a group reference (contains ":").
 func IsGroupRef(s string) bool {
@@ -27,9 +34,7 @@ func New(staticGroups map[string]map[string][]string, backstageURL, backstageTok
 			client:  &http.Client{},
 		})
 	}
-	if len(resolvers) == 1 {
-		return resolvers[0]
-	}
+	resolvers = append(resolvers, newGithubResolver())
 	return &chainResolver{resolvers: resolvers}
 }
 
@@ -44,11 +49,11 @@ func (r *staticResolver) Resolve(_ context.Context, ref string) ([]string, error
 	}
 	byName, ok := r.groups[kind]
 	if !ok {
-		return nil, fmt.Errorf("group kind %q not found", kind)
+		return nil, ErrUnhandled
 	}
 	repos, ok := byName[name]
 	if !ok {
-		return nil, fmt.Errorf("group %q not found", ref)
+		return nil, ErrUnhandled
 	}
 	return repos, nil
 }
@@ -62,6 +67,9 @@ func (r *chainResolver) Resolve(ctx context.Context, ref string) ([]string, erro
 		repos, err := res.Resolve(ctx, ref)
 		if err == nil {
 			return repos, nil
+		}
+		if !errors.Is(err, ErrUnhandled) {
+			return nil, err
 		}
 	}
 	return nil, fmt.Errorf("group %q not found", ref)

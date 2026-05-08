@@ -3,6 +3,7 @@ package groups
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,6 +60,168 @@ func TestChainResolver(t *testing.T) {
 	got, err := chain.Resolve(context.Background(), "team:myteam")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"org/repo1"}, got)
+}
+
+func TestGithubResolver(t *testing.T) {
+	// authLogin is what `gh api user --jq .login` returns in these cases —
+	// "someone-else" so user:<name> queries treat the target as a third
+	// party (using the public /users/<name>/repos endpoint).
+	const authLogin = "someone-else"
+	for _, tt := range []struct {
+		name     string
+		ref      string
+		wantArgs []string
+		stdout   string
+		want     []string
+	}{
+		{
+			name:     "org default filters archived and forks",
+			ref:      "org:acme",
+			wantArgs: []string{"api", "orgs/acme/repos", "--paginate", "--jq", ".[] | select(.archived == false and .fork == false) | .full_name"},
+			stdout:   "acme/a\nacme/b\n",
+			want:     []string{"acme/a", "acme/b"},
+		},
+		{
+			name:     "user default filters archived and forks",
+			ref:      "user:tethik",
+			wantArgs: []string{"api", "users/tethik/repos", "--paginate", "--jq", ".[] | select(.archived == false and .fork == false) | .full_name"},
+			stdout:   "tethik/x\n",
+			want:     []string{"tethik/x"},
+		},
+		{
+			name:     "+archived drops archived predicate",
+			ref:      "org:acme+archived",
+			wantArgs: []string{"api", "orgs/acme/repos", "--paginate", "--jq", ".[] | select(.fork == false) | .full_name"},
+			stdout:   "acme/a\n",
+			want:     []string{"acme/a"},
+		},
+		{
+			name:     "+forks drops fork predicate",
+			ref:      "org:acme+forks",
+			wantArgs: []string{"api", "orgs/acme/repos", "--paginate", "--jq", ".[] | select(.archived == false) | .full_name"},
+			stdout:   "acme/a\n",
+			want:     []string{"acme/a"},
+		},
+		{
+			name:     "+all drops all predicates",
+			ref:      "org:acme+all",
+			wantArgs: []string{"api", "orgs/acme/repos", "--paginate", "--jq", ".[] | .full_name"},
+			stdout:   "acme/a\nacme/b\n",
+			want:     []string{"acme/a", "acme/b"},
+		},
+		{
+			name:     "+archived+forks equivalent to +all",
+			ref:      "org:acme+archived+forks",
+			wantArgs: []string{"api", "orgs/acme/repos", "--paginate", "--jq", ".[] | .full_name"},
+			stdout:   "acme/a\n",
+			want:     []string{"acme/a"},
+		},
+		{
+			name:     "blank lines in output ignored",
+			ref:      "user:tethik+all",
+			wantArgs: []string{"api", "users/tethik/repos", "--paginate", "--jq", ".[] | .full_name"},
+			stdout:   "\ntethik/a\n\ntethik/b\n",
+			want:     []string{"tethik/a", "tethik/b"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotArgs []string
+			r := &githubResolver{
+				run: func(_ context.Context, args ...string) ([]byte, error) {
+					if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+						return []byte(authLogin + "\n"), nil
+					}
+					gotArgs = args
+					return []byte(tt.stdout), nil
+				},
+			}
+			got, err := r.Resolve(context.Background(), tt.ref)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantArgs, gotArgs)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestGithubResolver_SelfUserUsesPrivateEndpoint(t *testing.T) {
+	var gotArgs []string
+	r := &githubResolver{
+		run: func(_ context.Context, args ...string) ([]byte, error) {
+			if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+				return []byte("Tethik\n"), nil
+			}
+			gotArgs = args
+			return []byte("tethik/a\ntethik/b\n"), nil
+		},
+	}
+	got, err := r.Resolve(context.Background(), "user:tethik")
+	require.NoError(t, err)
+	// /user/repos with affiliation=owner returns repos including private.
+	assert.Equal(t, []string{
+		"api", "user/repos?affiliation=owner",
+		"--paginate", "--jq", ".[] | select(.archived == false and .fork == false) | .full_name",
+	}, gotArgs)
+	assert.Equal(t, []string{"tethik/a", "tethik/b"}, got)
+}
+
+func TestGithubResolver_AuthCheckFailureFallsBack(t *testing.T) {
+	var gotArgs []string
+	r := &githubResolver{
+		run: func(_ context.Context, args ...string) ([]byte, error) {
+			if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+				return nil, errors.New("not authenticated")
+			}
+			gotArgs = args
+			return []byte("tethik/a\n"), nil
+		},
+	}
+	got, err := r.Resolve(context.Background(), "user:tethik")
+	require.NoError(t, err)
+	// Falls back to public endpoint when auth check fails.
+	assert.Equal(t, "users/tethik/repos", gotArgs[1])
+	assert.Equal(t, []string{"tethik/a"}, got)
+}
+
+func TestGithubResolver_Errors(t *testing.T) {
+	calls := 0
+	noRun := func(_ context.Context, _ ...string) ([]byte, error) {
+		calls++
+		return nil, nil
+	}
+
+	t.Run("unsupported kind returns ErrUnhandled", func(t *testing.T) {
+		calls = 0
+		r := &githubResolver{run: noRun}
+		_, err := r.Resolve(context.Background(), "team:foo")
+		assert.ErrorIs(t, err, ErrUnhandled)
+		assert.Equal(t, 0, calls)
+	})
+
+	t.Run("unknown modifier rejected before exec", func(t *testing.T) {
+		calls = 0
+		r := &githubResolver{run: noRun}
+		_, err := r.Resolve(context.Background(), "org:acme+bogus")
+		assert.ErrorContains(t, err, "unknown modifier")
+		assert.Equal(t, 0, calls)
+	})
+
+	t.Run("missing name", func(t *testing.T) {
+		calls = 0
+		r := &githubResolver{run: noRun}
+		_, err := r.Resolve(context.Background(), "org:")
+		assert.ErrorContains(t, err, "missing name")
+		assert.Equal(t, 0, calls)
+	})
+
+	t.Run("empty result errors", func(t *testing.T) {
+		r := &githubResolver{
+			run: func(_ context.Context, _ ...string) ([]byte, error) {
+				return []byte(""), nil
+			},
+		}
+		_, err := r.Resolve(context.Background(), "org:acme")
+		assert.ErrorContains(t, err, "matched no repos")
+	})
 }
 
 func TestChainResolver_AllFail(t *testing.T) {
@@ -165,7 +328,7 @@ func TestRepoSlug(t *testing.T) {
 func TestBackstageResolver_UnsupportedKind(t *testing.T) {
 	r := &backstageResolver{baseURL: "http://localhost", client: &http.Client{}}
 	_, err := r.Resolve(context.Background(), "unknown:foo")
-	assert.ErrorContains(t, err, "unsupported group kind")
+	assert.ErrorIs(t, err, ErrUnhandled)
 }
 
 func TestNew_StaticOnly(t *testing.T) {

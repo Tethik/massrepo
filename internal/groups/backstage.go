@@ -115,6 +115,6 @@ func backstageFilter(kind, name string) (string, error) {
 	case "system":
 		return "kind=Component,spec.system=" + name, nil
 	default:
-		return "", fmt.Errorf("unsupported group kind %q: use team or system", kind)
+		return "", ErrUnhandled
 	}
 }
