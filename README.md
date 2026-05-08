@@ -16,6 +16,7 @@ Run security analysis, patching, and LLM tasks across many repositories at scale
 
 - Docker
 - Go 1.22+ (to build from source)
+- [`gh`](https://cli.github.com/) — GitHub CLI, authenticated (`gh auth login`)
 - SSH key with GitHub access (for cloning)
 
 ## Building
