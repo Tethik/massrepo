@@ -444,7 +444,10 @@ func createWorkspaceDirs(workDir string) error {
 	return nil
 }
 
-// copyDir recursively copies the contents of src into dst.
+// copyDir recursively copies the contents of src into dst. Symlinks are
+// recreated as symlinks (their target string is preserved verbatim) rather
+// than dereferenced, so links pointing within the tree keep working and
+// links to directories don't get walked into.
 func copyDir(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -455,6 +458,15 @@ func copyDir(src, dst string) error {
 			return err
 		}
 		target := filepath.Join(dst, rel)
+		if d.Type()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			// Remove any existing entry at target so re-copying is idempotent.
+			_ = os.Remove(target)
+			return os.Symlink(linkTarget, target)
+		}
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
