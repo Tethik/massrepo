@@ -132,12 +132,37 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 		return "", err
 	}
 	fmt.Printf("Session %s ready. Opening shell...\n", s.ID)
+	restoreTitle := setTerminalTitle(workspaceName + "/" + s.ID)
+	defer restoreTitle()
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-it",
 		containerName(workspaceName, s.ID), shell)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return s.ID, cmd.Run()
+}
+
+// setTerminalTitle pushes the current title onto the xterm title stack and
+// sets a new one. The returned function pops the stack to restore the
+// previous title. No-op if stdout is not a terminal.
+func setTerminalTitle(title string) func() {
+	if !isTerminal(os.Stdout) {
+		return func() {}
+	}
+	// CSI 22;0t — push window+icon title; OSC 0 — set both.
+	fmt.Fprintf(os.Stdout, "\033[22;0t\033]0;%s\007", title)
+	return func() {
+		// CSI 23;0t — pop the stacked title.
+		fmt.Fprint(os.Stdout, "\033[23;0t")
+	}
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // ensureRepo clones the repo into reposDir if it is not already present,
