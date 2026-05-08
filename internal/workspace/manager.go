@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,9 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 )
+
+//go:embed session_readme.md
+var sessionReadme []byte
 
 // containerHome is the home directory of the container user defined in the image.
 const containerHome = "/home/node"
@@ -171,8 +175,12 @@ func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
 func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []string) (Session, error) {
 	sessionID := uuid.NewString()
 	sessionDir := filepath.Join(cfg.WorkDir, "sessions", sessionID)
-	if err := os.MkdirAll(filepath.Join(sessionDir, "repos"), 0o755); err != nil {
+	workspaceDir := filepath.Join(sessionDir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
 		return Session{}, fmt.Errorf("create session dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "README.md"), sessionReadme, 0o644); err != nil {
+		return Session{}, fmt.Errorf("write session README: %v", err)
 	}
 	// Ensure all data dirs exist before the container starts — Docker creates
 	// missing bind-mount sources as root, which makes them unwritable in the container.
@@ -183,7 +191,7 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 	for _, repo := range repos {
 		fmt.Printf("Copying %s...\n", repo)
 		src := filepath.Join(m.reposDir, filepath.FromSlash(repo))
-		dst := filepath.Join(sessionDir, "repos", filepath.FromSlash(repo))
+		dst := filepath.Join(workspaceDir, filepath.FromSlash(repo))
 		if err := copyDir(src, dst); err != nil {
 			_ = os.RemoveAll(sessionDir)
 			return Session{}, fmt.Errorf("copy repo %q: %v", repo, err)
@@ -202,7 +210,10 @@ func (m *Manager) newSession(ctx context.Context, cfg WorkspaceConfig, repos []s
 		},
 		&container.HostConfig{
 			Binds: append(
-				append(repoBinds(sessionDir, repos), homeBind(cfg.WorkDir)),
+				[]string{
+					workspaceDir + ":" + containerWorkspace,
+					homeBind(cfg.WorkDir),
+				},
 				sshBinds...,
 			),
 		},
@@ -341,18 +352,6 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 		Name:  destName,
 		Image: src.Image,
 	})
-}
-
-// repoBinds builds Docker bind-mount strings for each repo in a session.
-// Each repo is mounted at /workspace/<org>/<repo> inside the container.
-func repoBinds(sessionDir string, repos []string) []string {
-	binds := make([]string, len(repos))
-	for i, repo := range repos {
-		hostPath := filepath.Join(sessionDir, "repos", filepath.FromSlash(repo))
-		containerPath := containerWorkspace + "/" + repo
-		binds[i] = hostPath + ":" + containerPath
-	}
-	return binds
 }
 
 // homeBind returns a single bind mount for the workspace's persistent home

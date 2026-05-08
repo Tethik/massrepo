@@ -375,7 +375,7 @@ var openCmd = &cobra.Command{
 	Long: `Open a workspace or session directory in an editor.
 
   open <workspace>                         opens the workspace root
-  open <workspace>/<session>               opens the session repos directory
+  open <workspace>/<session>               opens the session workspace directory
   open <workspace>/<session> <org/repo>    opens a specific repo within a session`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(_ *cobra.Command, args []string) error {
@@ -403,7 +403,7 @@ var openCmd = &cobra.Command{
 
 		target := cfg.WorkDir
 		if sess != "" {
-			target = filepath.Join(cfg.WorkDir, "sessions", sess, "repos")
+			target = filepath.Join(cfg.WorkDir, "sessions", sess, "workspace")
 		}
 		if len(args) == 2 {
 			target = filepath.Join(target, filepath.FromSlash(args[1]))
