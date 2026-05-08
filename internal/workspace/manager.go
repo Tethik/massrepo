@@ -140,12 +140,20 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 	return s.ID, cmd.Run()
 }
 
-// ensureRepo clones the repo into reposDir if it is not already present.
+// ensureRepo clones the repo into reposDir if it is not already present,
+// or pulls the latest changes if it already exists.
 // repo must be an "org/name" path matching a GitHub repository.
 // Tries git over SSH first; falls back to gh if git fails.
 func (m *Manager) ensureRepo(ctx context.Context, repo string) error {
 	dst := filepath.Join(m.reposDir, filepath.FromSlash(repo))
 	if _, err := os.Stat(dst); err == nil {
+		fmt.Printf("Updating %s...\n", repo)
+		cmd := exec.CommandContext(ctx, "git", "-C", dst, "pull", "--ff-only", "--quiet")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("git pull failed for %s, using existing copy\n", repo)
+		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
