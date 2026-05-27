@@ -111,7 +111,7 @@ func slugFromGitHubURL(rawURL string) string {
 func backstageFilter(kind, name string) (string, error) {
 	switch kind {
 	case "team":
-		return "kind=Component,spec.owner=group:default/" + name, nil
+		return "kind=Component,relations.ownedBy=group:default/" + name, nil
 	case "system":
 		return "kind=Component,spec.system=" + name, nil
 	default:

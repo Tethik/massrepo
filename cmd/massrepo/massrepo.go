@@ -217,7 +217,7 @@ func expandRefs(ctx context.Context, r groups.Resolver, refs []string) ([]string
 }
 
 var shellCmd = &cobra.Command{
-	Use:   "shell <workspace> <org/repo|group:name> [<org/repo|group:name>...]",
+	Use:   "shell <workspace> <org/repo|team:name|system:name|org:name|user:name> [...]",
 	Short: "Create a new session with the given repos and open an interactive shell in it",
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
