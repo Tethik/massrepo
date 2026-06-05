@@ -144,6 +144,10 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 		return "", err
 	}
 	fmt.Printf("Session %s ready. Opening shell...\n", s.ID)
+	if isTerminal(os.Stdout) && !welcomeShown(cfg.WorkDir) {
+		fmt.Print(welcomeBanner(cfg))
+		_ = markWelcomeShown(cfg.WorkDir) // best-effort; don't block the shell
+	}
 	restoreTitle := setTerminalTitle(workspaceName + "/" + s.ID)
 	defer restoreTitle()
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-it",
