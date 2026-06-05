@@ -42,6 +42,7 @@ type Manager struct {
 	reposDir      string // absolute path to repositories root
 	workspacesDir string // absolute path to the workspace parent directory
 	imagesDir     string // absolute path to the images directory containing Dockerfiles
+	skillCacheDir string // absolute path to the cache of cloned git skills
 	defaultImage  string
 }
 
@@ -63,14 +64,17 @@ func NewManager(reposDir, workspacesDir, imagesDir, defaultImage string) (*Manag
 		reposDir:      reposDir,
 		workspacesDir: workspacesDir,
 		imagesDir:     imagesDir,
+		// The skill cache lives alongside the workspace dir under data_path.
+		skillCacheDir: filepath.Join(filepath.Dir(workspacesDir), "skillcache"),
 		defaultImage:  defaultImage,
 	}, nil
 }
 
 // CreateOptions holds parameters for workspace creation.
 type CreateOptions struct {
-	Name  string // workspace name; must be unique
-	Image string // Docker image; falls back to defaultImage if empty
+	Name   string       // workspace name; must be unique
+	Image  string       // Docker image; falls back to defaultImage if empty
+	Assets ClaudeAssets // skills and MCP servers to seed into the workspace home
 }
 
 // Create sets up the workspace directory structure and persists its configuration.
@@ -94,11 +98,18 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (WorkspaceConf
 		return WorkspaceConfig{}, err
 	}
 
+	if err := m.seedClaudeAssets(ctx, workDir, opts.Assets); err != nil {
+		_ = os.RemoveAll(workDir)
+		return WorkspaceConfig{}, fmt.Errorf("seed claude assets: %v", err)
+	}
+
 	cfg := WorkspaceConfig{
-		Name:    opts.Name,
-		Image:   image,
-		Created: time.Now().UTC(),
-		WorkDir: workDir,
+		Name:       opts.Name,
+		Image:      image,
+		Created:    time.Now().UTC(),
+		Skills:     opts.Assets.Skills,
+		MCPServers: opts.Assets.MCPServers,
+		WorkDir:    workDir,
 	}
 	if err := writeWorkspaceConfig(cfg); err != nil {
 		_ = os.RemoveAll(workDir)
@@ -354,8 +365,9 @@ func (m *Manager) Remove(ctx context.Context, workspaceName string) error {
 	return nil
 }
 
-// Duplicate creates a new workspace with the same image as the source.
-// No sessions are copied; the new workspace starts empty.
+// Duplicate creates a new workspace with the same image, skills and MCP servers
+// as the source. No sessions are copied; the new workspace starts empty and its
+// assets are re-seeded from the source's recorded configuration.
 func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (WorkspaceConfig, error) {
 	src, err := m.Workspace(sourceName)
 	if err != nil {
@@ -364,6 +376,10 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 	return m.Create(ctx, CreateOptions{
 		Name:  destName,
 		Image: src.Image,
+		Assets: ClaudeAssets{
+			Skills:     src.Skills,
+			MCPServers: src.MCPServers,
+		},
 	})
 }
 

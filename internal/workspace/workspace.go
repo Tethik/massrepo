@@ -21,10 +21,80 @@ const (
 
 // WorkspaceConfig holds workspace metadata persisted to workspace.yaml.
 type WorkspaceConfig struct {
-	Name    string    `yaml:"name"`
-	Image   string    `yaml:"image"`
-	Created time.Time `yaml:"created"`
-	WorkDir string    `yaml:"-"` // derived from path at load time, not stored
+	Name       string               `yaml:"name"`
+	Image      string               `yaml:"image"`
+	Created    time.Time            `yaml:"created"`
+	Skills     []SkillSource        `yaml:"skills,omitempty"`
+	MCPServers map[string]MCPServer `yaml:"mcp_servers,omitempty"`
+	WorkDir    string               `yaml:"-"` // derived from path at load time, not stored
+}
+
+// SkillSource locates a Claude skill to seed into a workspace's home directory.
+// It is either a local host directory (Path) or a git repository (Git plus Ref,
+// with an optional Subdir within the repo). The two forms are mutually
+// exclusive; only git-backed sources are portable across machines.
+type SkillSource struct {
+	Path   string `yaml:"path,omitempty" mapstructure:"path"`
+	Git    string `yaml:"git,omitempty" mapstructure:"git"`
+	Ref    string `yaml:"ref,omitempty" mapstructure:"ref"`
+	Subdir string `yaml:"subdir,omitempty" mapstructure:"subdir"`
+}
+
+// Validate reports whether a skill source is well-formed. A source is either a
+// local Path or a git repository; git sources must pin both a Ref and a Subdir
+// (the directory within the repo that holds the skill), which also keeps the
+// repo's .git tree out of the installed skill.
+func (s SkillSource) Validate() error {
+	switch {
+	case s.Path != "" && s.Git != "":
+		return fmt.Errorf("skill source must set either path or git, not both")
+	case s.Path == "" && s.Git == "":
+		return fmt.Errorf("skill source must set either path or git")
+	case s.Git != "" && s.Ref == "":
+		return fmt.Errorf("git skill %q requires a ref", s.Git)
+	case s.Git != "" && s.Subdir == "":
+		return fmt.Errorf("git skill %q requires a subdir", s.Git)
+	}
+	return nil
+}
+
+// UnmarshalYAML accepts either a scalar string (treated as a local Path) or a
+// mapping with the git fields.
+func (s *SkillSource) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		return value.Decode(&s.Path)
+	}
+	// Alias the type to avoid recursing back into this method.
+	type raw SkillSource
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	*s = SkillSource(r)
+	return nil
+}
+
+// MarshalYAML emits a bare scalar for local-path sources and a mapping for
+// git-backed ones, mirroring UnmarshalYAML.
+func (s SkillSource) MarshalYAML() (any, error) {
+	if s.Git == "" {
+		return s.Path, nil
+	}
+	type raw SkillSource
+	return raw(s), nil
+}
+
+// MCPServer is a Model Context Protocol server definition. The same struct is
+// read from config/manifest YAML and written verbatim into Claude's
+// .claude.json (hence the json tags). For stdio servers set Command/Args/Env;
+// for HTTP servers set URL/Headers and Type "http".
+type MCPServer struct {
+	Type    string            `yaml:"type,omitempty" mapstructure:"type" json:"type,omitempty"`
+	Command string            `yaml:"command,omitempty" mapstructure:"command" json:"command,omitempty"`
+	Args    []string          `yaml:"args,omitempty" mapstructure:"args" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty" mapstructure:"env" json:"env,omitempty"`
+	URL     string            `yaml:"url,omitempty" mapstructure:"url" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" mapstructure:"headers" json:"headers,omitempty"`
 }
 
 // Session represents a running or stopped container belonging to a workspace.

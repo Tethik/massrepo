@@ -62,6 +62,10 @@ func init() {
 		stopCmd,
 		rmCmd,
 		duplicateCmd,
+		exportCmd,
+		importCmd,
+		skillCmd,
+		mcpCmd,
 		buildImageCmd,
 		pathCmd,
 	)
@@ -117,14 +121,21 @@ func confirm(prompt string) bool {
 
 // --- create ---
 
-var createImage string
+var (
+	createImage           string
+	createSkills          []string
+	createMCP             []string
+	createNoDefaultSkills bool
+	createNoDefaultMCP    bool
+)
 
 var createCmd = &cobra.Command{
 	Use:   "create <name>",
 	Short: "Create a new workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := newManager(loadConfig())
+		cfg := loadConfig()
+		m, err := newManager(cfg)
 		if err != nil {
 			return err
 		}
@@ -132,14 +143,19 @@ var createCmd = &cobra.Command{
 		if img == "" {
 			img = flagImage
 		}
-		cfg, err := m.Create(cmd.Context(), workspace.CreateOptions{
-			Name:  args[0],
-			Image: img,
+		assets, err := resolveAssets(cfg)
+		if err != nil {
+			return err
+		}
+		ws, err := m.Create(cmd.Context(), workspace.CreateOptions{
+			Name:   args[0],
+			Image:  img,
+			Assets: assets,
 		})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Created workspace %q\n", cfg.Name)
+		fmt.Printf("Created workspace %q\n", ws.Name)
 		return nil
 	},
 }
@@ -147,6 +163,46 @@ var createCmd = &cobra.Command{
 func init() {
 	createCmd.Flags().StringVar(&createImage, "image", "",
 		"Docker image for this workspace (overrides --image)")
+	createCmd.Flags().StringArrayVar(&createSkills, "skill", nil,
+		"extra skill source directory to seed (repeatable; in addition to config defaults)")
+	createCmd.Flags().StringArrayVar(&createMCP, "mcp", nil,
+		"name of an MCP server (from config mcp_servers) to enable (repeatable)")
+	createCmd.Flags().BoolVar(&createNoDefaultSkills, "no-default-skills", false,
+		"skip the skills configured under 'skills' in config")
+	createCmd.Flags().BoolVar(&createNoDefaultMCP, "no-default-mcp", false,
+		"skip the servers listed under 'default_mcp_servers' in config")
+}
+
+// resolveAssets combines the configured defaults with per-create flags into the
+// final set of skills and MCP servers to seed into the new workspace.
+func resolveAssets(cfg *config.Config) (workspace.ClaudeAssets, error) {
+	var skills []workspace.SkillSource
+	if !createNoDefaultSkills {
+		skills = append(skills, cfg.Skills...)
+	}
+	for _, p := range createSkills {
+		skills = append(skills, workspace.SkillSource{Path: p})
+	}
+
+	var names []string
+	if !createNoDefaultMCP {
+		names = append(names, cfg.DefaultMCPServers...)
+	}
+	names = append(names, createMCP...)
+
+	var servers map[string]workspace.MCPServer
+	for _, name := range names {
+		srv, ok := cfg.MCPServers[name]
+		if !ok {
+			return workspace.ClaudeAssets{}, fmt.Errorf("unknown mcp server %q: define it under mcp_servers in config", name)
+		}
+		if servers == nil {
+			servers = make(map[string]workspace.MCPServer)
+		}
+		servers[name] = srv
+	}
+
+	return workspace.ClaudeAssets{Skills: skills, MCPServers: servers}, nil
 }
 
 // --- list ---
@@ -344,6 +400,379 @@ var duplicateCmd = &cobra.Command{
 		fmt.Printf("Duplicated %q to %q\n", args[0], cfg.Name)
 		return nil
 	},
+}
+
+// --- export ---
+
+var exportOutput string
+
+var exportCmd = &cobra.Command{
+	Use:   "export <workspace>",
+	Short: "Export a workspace's skills and MCP servers as a shareable manifest",
+	Long: `Export a workspace's skills and MCP servers as a portable manifest.
+
+Skills are emitted as git references (local-path skills are skipped with a
+warning, since they are not portable). MCP secret values in env/headers are
+stripped, leaving the keys as placeholders for the importer to fill in.
+
+The manifest is written to stdout by default, or to a file with --output.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		man, err := m.ExportManifest(args[0])
+		if err != nil {
+			return err
+		}
+		out := os.Stdout
+		if exportOutput != "" {
+			f, err := os.Create(exportOutput)
+			if err != nil {
+				return fmt.Errorf("create output file: %v", err)
+			}
+			defer f.Close()
+			out = f
+		}
+		if err := workspace.WriteManifest(man, out); err != nil {
+			return err
+		}
+		if exportOutput != "" {
+			fmt.Fprintf(os.Stderr, "Wrote manifest to %s\n", exportOutput)
+		}
+		return nil
+	},
+}
+
+func init() {
+	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "",
+		"write the manifest to a file instead of stdout")
+}
+
+// --- import ---
+
+var (
+	importUpdate bool
+	importPrune  bool
+)
+
+var importCmd = &cobra.Command{
+	Use:   "import <manifest> <name>",
+	Short: "Create or update a workspace from a shared manifest",
+	Long: `Create a workspace from a manifest produced by 'massrepo export', or update
+an existing one with --update.
+
+Git-backed skills are cloned and MCP servers are seeded. Without --update the
+workspace must not already exist. With --update the manifest is merged into the
+existing workspace: skills and MCP servers are added or updated, the manifest's
+image is adopted, and everything else is left in place — add --prune to also
+remove skills/servers absent from the manifest.
+
+Re-applying an exported manifest is safe: blank secret placeholders in the
+manifest do not overwrite env/header values already filled in the workspace's
+home/.claude.json.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		man, err := workspace.ReadManifest(args[0])
+		if err != nil {
+			return err
+		}
+		manifestPath, name := args[0], args[1]
+
+		// --prune only makes sense when updating.
+		update := importUpdate || importPrune
+		_, err = m.Workspace(name)
+		exists := err == nil
+
+		if exists && !update {
+			return fmt.Errorf("workspace %q already exists; pass --update to update it", name)
+		}
+		if exists {
+			if err := m.ApplyManifest(cmd.Context(), name, man, workspace.ApplyOptions{Prune: importPrune}); err != nil {
+				return err
+			}
+			fmt.Printf("Updated workspace %q from %s\n", name, manifestPath)
+			return nil
+		}
+
+		img := man.Image
+		if img == "" {
+			img = flagImage
+		}
+		ws, err := m.Create(cmd.Context(), workspace.CreateOptions{
+			Name:  name,
+			Image: img,
+			Assets: workspace.ClaudeAssets{
+				Skills:     man.Skills,
+				MCPServers: man.MCPServers,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Created workspace %q from %s\n", ws.Name, manifestPath)
+		return nil
+	},
+}
+
+func init() {
+	importCmd.Flags().BoolVar(&importUpdate, "update", false,
+		"update the workspace if it already exists instead of erroring")
+	importCmd.Flags().BoolVar(&importPrune, "prune", false,
+		"when updating, remove skills/servers not present in the manifest (implies --update)")
+}
+
+// --- skill ---
+
+var skillCmd = &cobra.Command{
+	Use:   "skill",
+	Short: "Manage the skills provisioned in a workspace",
+}
+
+var (
+	skillAddRef    string
+	skillAddSubdir string
+)
+
+var skillAddCmd = &cobra.Command{
+	Use:   "add <workspace> <path|git-url>",
+	Short: "Add a skill to a workspace",
+	Long: `Add a skill to an existing workspace.
+
+The source is either a local directory or a git URL. For git sources, both --ref
+and --subdir are required: --ref pins the revision and --subdir selects the
+directory within the repository that holds the skill (use "." when the skill is
+at the repository root).`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		ws, source := args[0], args[1]
+		var src workspace.SkillSource
+		if isGitURL(source) {
+			src = workspace.SkillSource{Git: source, Ref: skillAddRef, Subdir: skillAddSubdir}
+		} else {
+			src = workspace.SkillSource{Path: source}
+		}
+		if err := src.Validate(); err != nil {
+			return err
+		}
+		if err := m.AddSkill(cmd.Context(), ws, src); err != nil {
+			return err
+		}
+		fmt.Printf("Added skill %q to workspace %q\n", workspace.SkillName(src), ws)
+		return nil
+	},
+}
+
+var skillListCmd = &cobra.Command{
+	Use:     "list <workspace>",
+	Aliases: []string{"ls"},
+	Short:   "List the skills provisioned in a workspace",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		cfg, err := m.Workspace(args[0])
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tSOURCE")
+		for _, s := range cfg.Skills {
+			fmt.Fprintf(tw, "%s\t%s\n", workspace.SkillName(s), skillSourceString(s))
+		}
+		return tw.Flush()
+	},
+}
+
+var skillRmCmd = &cobra.Command{
+	Use:   "rm <workspace> <name>",
+	Short: "Remove a skill from a workspace",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(_ *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		if err := m.RemoveSkill(args[0], args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("Removed skill %q from workspace %q\n", args[1], args[0])
+		return nil
+	},
+}
+
+func init() {
+	skillAddCmd.Flags().StringVar(&skillAddRef, "ref", "", "git ref (branch, tag, or commit); required for git sources")
+	skillAddCmd.Flags().StringVar(&skillAddSubdir, "subdir", "", "directory within a git repository holding the skill (\".\" for the repo root); required for git sources")
+	skillCmd.AddCommand(skillAddCmd, skillListCmd, skillRmCmd)
+}
+
+// --- mcp ---
+
+var mcpCmd = &cobra.Command{
+	Use:   "mcp",
+	Short: "Manage the MCP servers provisioned in a workspace",
+}
+
+var (
+	mcpAddURL       string
+	mcpAddTransport string
+	mcpAddHeaders   []string
+	mcpAddCommand   string
+	mcpAddArgs      []string
+	mcpAddEnv       []string
+)
+
+var mcpAddCmd = &cobra.Command{
+	Use:   "add <workspace> <name>",
+	Short: "Add an MCP server to a workspace",
+	Long: `Add an MCP server to an existing workspace.
+
+Provide an HTTP server with --url (and optional --header K=V), a stdio server
+with --command (and optional --arg / --env K=V), or neither to look the name up
+in the 'mcp_servers' library defined in config.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(_ *cobra.Command, args []string) error {
+		cfg := loadConfig()
+		m, err := newManager(cfg)
+		if err != nil {
+			return err
+		}
+		ws, name := args[0], args[1]
+		srv, err := mcpServerFromFlags(cfg, name)
+		if err != nil {
+			return err
+		}
+		if err := m.AddMCPServer(ws, name, srv); err != nil {
+			return err
+		}
+		fmt.Printf("Added MCP server %q to workspace %q\n", name, ws)
+		return nil
+	},
+}
+
+var mcpListCmd = &cobra.Command{
+	Use:     "list <workspace>",
+	Aliases: []string{"ls"},
+	Short:   "List the MCP servers provisioned in a workspace",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		cfg, err := m.Workspace(args[0])
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tTYPE\tTARGET")
+		for name, srv := range cfg.MCPServers {
+			target := srv.URL
+			if target == "" {
+				target = srv.Command
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", name, srv.Type, target)
+		}
+		return tw.Flush()
+	},
+}
+
+var mcpRmCmd = &cobra.Command{
+	Use:   "rm <workspace> <name>",
+	Short: "Remove an MCP server from a workspace",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(_ *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		if err := m.RemoveMCPServer(args[0], args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("Removed MCP server %q from workspace %q\n", args[1], args[0])
+		return nil
+	},
+}
+
+func init() {
+	mcpAddCmd.Flags().StringVar(&mcpAddURL, "url", "", "URL of an HTTP MCP server")
+	mcpAddCmd.Flags().StringVar(&mcpAddTransport, "transport", "http", "transport for --url servers (http or sse)")
+	mcpAddCmd.Flags().StringArrayVar(&mcpAddHeaders, "header", nil, "HTTP header as KEY=VALUE (repeatable)")
+	mcpAddCmd.Flags().StringVar(&mcpAddCommand, "command", "", "executable for a stdio MCP server")
+	mcpAddCmd.Flags().StringArrayVar(&mcpAddArgs, "arg", nil, "argument for a stdio --command (repeatable)")
+	mcpAddCmd.Flags().StringArrayVar(&mcpAddEnv, "env", nil, "environment variable as KEY=VALUE (repeatable)")
+	mcpCmd.AddCommand(mcpAddCmd, mcpListCmd, mcpRmCmd)
+}
+
+// mcpServerFromFlags builds an MCPServer from the add flags, or falls back to a
+// named definition in the config library when no transport flags are given.
+func mcpServerFromFlags(cfg *config.Config, name string) (workspace.MCPServer, error) {
+	switch {
+	case mcpAddURL != "":
+		headers, err := parseKeyValues(mcpAddHeaders)
+		if err != nil {
+			return workspace.MCPServer{}, err
+		}
+		return workspace.MCPServer{Type: mcpAddTransport, URL: mcpAddURL, Headers: headers}, nil
+	case mcpAddCommand != "":
+		env, err := parseKeyValues(mcpAddEnv)
+		if err != nil {
+			return workspace.MCPServer{}, err
+		}
+		return workspace.MCPServer{Type: "stdio", Command: mcpAddCommand, Args: mcpAddArgs, Env: env}, nil
+	default:
+		srv, ok := cfg.MCPServers[name]
+		if !ok {
+			return workspace.MCPServer{}, fmt.Errorf("no --url/--command given and %q not found in config mcp_servers", name)
+		}
+		return srv, nil
+	}
+}
+
+// isGitURL reports whether a skill source string is a remote git reference
+// rather than a local path.
+func isGitURL(s string) bool {
+	return strings.Contains(s, "://") || strings.HasPrefix(s, "git@")
+}
+
+// parseKeyValues parses "KEY=VALUE" pairs into a map.
+func parseKeyValues(items []string) (map[string]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid KEY=VALUE pair %q", item)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+// skillSourceString renders a skill source for display in listings.
+func skillSourceString(s workspace.SkillSource) string {
+	if s.Git == "" {
+		return s.Path
+	}
+	src := s.Git + "@" + s.Ref
+	if s.Subdir != "" {
+		src += " (" + s.Subdir + ")"
+	}
+	return src
 }
 
 // --- build-image ---

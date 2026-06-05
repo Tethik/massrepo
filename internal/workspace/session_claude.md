@@ -16,13 +16,21 @@ the session.
 - `/workspace/...` — **session-scoped**. Cleared when this session is removed.
 - `$HOME` (`/home/node`) — **workspace-scoped**. Shared across every session
   of this workspace, persisting auth and CLI configs:
-  - `$HOME/.claude`, `$HOME/.claude.json` — Claude Code settings/auth
+  - `$HOME/.claude`, `$HOME/.claude.json` — Claude Code settings/auth.
+    Workspace-level skills (`$HOME/.claude/skills`) and MCP servers
+    (`mcpServers` in `$HOME/.claude.json`) are pre-provisioned here at
+    workspace creation.
   - `$HOME/.config/gh` — GitHub CLI auth
   - `$HOME/.config/git` — git config
   - `$HOME/.ssh` — SSH keys/known_hosts
 
 Anything outside `/workspace` and `$HOME` (e.g. `/tmp`, system packages
 installed at runtime) does **not** persist beyond container restarts.
+
+If you need to install a binary, put it in `$HOME/.bin` (`/home/node/.bin`)
+so it survives across sessions, and make sure that directory is on your
+`PATH` (`export PATH="$HOME/.bin:$PATH"`). Tools installed to system paths
+(e.g. via `apk`) are lost when the container is recreated.
 
 ## Repos in this session
 {{REPOS}}
