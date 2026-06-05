@@ -50,8 +50,8 @@ independent session with its own copy of the workspace repos.`,
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagReposDir, "repos-dir", "",
 		"path to the repositories directory (overrides config)")
-	rootCmd.PersistentFlags().StringVar(&flagImagesDir, "images-dir", "./images",
-		"path to the directory containing Dockerfiles")
+	rootCmd.PersistentFlags().StringVar(&flagImagesDir, "images-dir", "",
+		"images root holding <image>/Dockerfile (default: <data_path>/images)")
 	rootCmd.PersistentFlags().StringVar(&flagImage, "image", "massrepo-claude:latest",
 		"default Docker image for new workspaces")
 
@@ -62,6 +62,7 @@ func init() {
 		stopCmd,
 		rmCmd,
 		duplicateCmd,
+		setImageCmd,
 		exportCmd,
 		importCmd,
 		skillCmd,
@@ -92,13 +93,19 @@ func newManager(cfg *config.Config) (*workspace.Manager, error) {
 		reposDir = r
 	}
 
-	imagesDir, err := filepath.Abs(flagImagesDir)
+	// Default the images root to <data_path>/images so massrepo works without a
+	// repo checkout; --images-dir overrides it.
+	imagesRoot := flagImagesDir
+	if imagesRoot == "" {
+		imagesRoot = filepath.Join(cfg.DataPath, "images")
+	}
+	imagesRoot, err := filepath.Abs(imagesRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve images-dir: %v", err)
 	}
 
 	workspacesDir := filepath.Join(cfg.DataPath, "workspace")
-	return workspace.NewManager(reposDir, workspacesDir, imagesDir, flagImage)
+	return workspace.NewManager(reposDir, workspacesDir, imagesRoot, flagImage)
 }
 
 // splitRef splits "workspace/session" into its two parts.
@@ -127,6 +134,7 @@ var (
 	createMCP             []string
 	createNoDefaultSkills bool
 	createNoDefaultMCP    bool
+	createPull            bool
 )
 
 var createCmd = &cobra.Command{
@@ -150,6 +158,7 @@ var createCmd = &cobra.Command{
 		ws, err := m.Create(cmd.Context(), workspace.CreateOptions{
 			Name:   args[0],
 			Image:  img,
+			Pull:   createPull,
 			Assets: assets,
 		})
 		if err != nil {
@@ -171,6 +180,8 @@ func init() {
 		"skip the skills configured under 'skills' in config")
 	createCmd.Flags().BoolVar(&createNoDefaultMCP, "no-default-mcp", false,
 		"skip the servers listed under 'default_mcp_servers' in config")
+	createCmd.Flags().BoolVar(&createPull, "pull", false,
+		"allow fetching the image from a registry when it can't be built locally")
 }
 
 // resolveAssets combines the configured defaults with per-create flags into the
@@ -402,6 +413,38 @@ var duplicateCmd = &cobra.Command{
 	},
 }
 
+// --- set-image ---
+
+var setImagePull bool
+
+var setImageCmd = &cobra.Command{
+	Use:   "set-image <workspace> <image>",
+	Short: "Change the Docker image used by a workspace",
+	Long: `Change the Docker image recorded for an existing workspace.
+
+The new image is built from its Dockerfile (or fetched with --pull) immediately,
+so any problem surfaces now rather than at the next shell. Existing sessions keep
+their current image; new sessions use the new one.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := newManager(loadConfig())
+		if err != nil {
+			return err
+		}
+		cfg, err := m.SetImage(cmd.Context(), args[0], args[1], setImagePull)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Set workspace %q image to %q\n", cfg.Name, cfg.Image)
+		return nil
+	},
+}
+
+func init() {
+	setImageCmd.Flags().BoolVar(&setImagePull, "pull", false,
+		"allow fetching the image from a registry when it can't be built locally")
+}
+
 // --- export ---
 
 var exportOutput string
@@ -455,6 +498,7 @@ func init() {
 var (
 	importUpdate bool
 	importPrune  bool
+	importPull   bool
 )
 
 var importCmd = &cobra.Command{
@@ -493,7 +537,7 @@ home/.claude.json.`,
 			return fmt.Errorf("workspace %q already exists; pass --update to update it", name)
 		}
 		if exists {
-			if err := m.ApplyManifest(cmd.Context(), name, man, workspace.ApplyOptions{Prune: importPrune}); err != nil {
+			if err := m.ApplyManifest(cmd.Context(), name, man, workspace.ApplyOptions{Prune: importPrune, Pull: importPull}); err != nil {
 				return err
 			}
 			fmt.Printf("Updated workspace %q from %s\n", name, manifestPath)
@@ -505,8 +549,10 @@ home/.claude.json.`,
 			img = flagImage
 		}
 		ws, err := m.Create(cmd.Context(), workspace.CreateOptions{
-			Name:  name,
-			Image: img,
+			Name:       name,
+			Image:      img,
+			Dockerfile: man.Dockerfile,
+			Pull:       importPull,
 			Assets: workspace.ClaudeAssets{
 				Skills:     man.Skills,
 				MCPServers: man.MCPServers,
@@ -525,6 +571,8 @@ func init() {
 		"update the workspace if it already exists instead of erroring")
 	importCmd.Flags().BoolVar(&importPrune, "prune", false,
 		"when updating, remove skills/servers not present in the manifest (implies --update)")
+	importCmd.Flags().BoolVar(&importPull, "pull", false,
+		"allow fetching the image from a registry when it can't be built locally")
 }
 
 // --- skill ---
@@ -782,9 +830,11 @@ var buildImageCmd = &cobra.Command{
 	Short: "Build (or rebuild) a Docker image",
 	Long: `Build the Docker image used for workspaces.
 
-If no image name is given, the value of --image is used.
-The Dockerfile is resolved from the image name: "massrepo-claude:latest" uses
-<images-dir>/Dockerfile.claude.`,
+If no image name is given, the value of --image is used. The Dockerfile is
+resolved from the image name: "massrepo-claude:latest" uses
+<images-dir>/massrepo-claude/Dockerfile. Built-in defaults are bundled with
+massrepo and materialized into the images root on first use, so no repo checkout
+is needed.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		imageName := flagImage

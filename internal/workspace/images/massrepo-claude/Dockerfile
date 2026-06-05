@@ -11,7 +11,7 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 RUN addgroup -S claude && adduser -S -G claude claude
 RUN npm install -g @anthropic-ai/claude-code
 RUN mkdir -p /workspace && chmod 1777 /workspace
-USER claude
+USER node
 WORKDIR /workspace
 RUN git config --global --add safe.directory '*'
 ENTRYPOINT ["claude"]

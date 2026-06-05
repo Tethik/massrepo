@@ -215,6 +215,18 @@ Create a new workspace with the same image as an existing one. No sessions are c
 massrepo duplicate my-workspace my-workspace-2
 ```
 
+### `massrepo set-image <workspace> <image>`
+
+Change the Docker image an existing workspace uses. The new image is built from
+its Dockerfile (or fetched with `--pull`) immediately, so problems surface now
+rather than at the next shell. Existing sessions keep their current image; new
+sessions use the new one.
+
+```sh
+massrepo set-image my-workspace einride-sec-base:latest
+massrepo set-image my-workspace ghcr.io/org/img:1.2.3 --pull
+```
+
 ### `massrepo skill` — manage a workspace's skills
 
 Add, list, and remove skills on an existing workspace. Changes are materialized
@@ -284,13 +296,38 @@ a value you've already filled into `home/.claude.json`.
 
 ### `massrepo build-image [image]`
 
-Build (or rebuild) a Docker image. The Dockerfile is resolved from the image name:
-`massrepo-claude:latest` → `<images-dir>/Dockerfile.claude`
+Build (or rebuild) a Docker image. Dockerfiles live one per image folder under
+the images root (default `~/.massrepo/images`), so the image name maps to
+`<images-root>/<image>/Dockerfile` — e.g. `massrepo-claude:latest` →
+`~/.massrepo/images/massrepo-claude/Dockerfile`.
+
+The default image's Dockerfile is **bundled with massrepo** and written into the
+images root on first use, so this works with no repo checkout. Edit the
+materialized Dockerfile (or add `~/.massrepo/images/<name>/Dockerfile`) to
+customize; `--images-dir` points at a different root.
 
 ```sh
 massrepo build-image
 massrepo build-image massrepo-claude:latest
 ```
+
+### Images, building, and pulling
+
+massrepo never silently pulls the workspace image from a registry. The image is
+**built from a Dockerfile** (the bundled default, or one under the images root)
+and **rebuilt automatically when that Dockerfile/context changes** — checked
+when a workspace is created and when you open a shell into it (a content hash is
+stamped on the image as a label, so an unchanged image is reused as-is). If the
+image is absent and has no Dockerfile, `create`/`import` error and suggest
+`--pull`, which opts into fetching it from a registry.
+
+So to change an image: edit `~/.massrepo/images/<image>/Dockerfile` and just
+`massrepo shell …` (or `create`) — it rebuilds on the next use. `massrepo
+build-image` forces a rebuild immediately.
+
+`export` embeds the image's current Dockerfile inline in the manifest, and
+`import` writes and builds it locally — so a shared `massrepo.yaml` reproduces
+the image without anyone needing access to a registry.
 
 ### `massrepo path <workspace>[/<session>] [<org/repo>]`
 
@@ -313,5 +350,5 @@ cd $(massrepo path my-workspace/20260424-143200)
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repos-dir` | (from config) | Override the repo cache directory |
-| `--images-dir` | `./images` | Path to the directory containing Dockerfiles |
+| `--images-dir` | `<data_path>/images` | Images root holding `<image>/Dockerfile` |
 | `--image` | `massrepo-claude:latest` | Default Docker image for new workspaces |

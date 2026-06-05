@@ -2,7 +2,9 @@ package workspace
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,14 +44,14 @@ type Manager struct {
 	docker        *client.Client
 	reposDir      string // absolute path to repositories root
 	workspacesDir string // absolute path to the workspace parent directory
-	imagesDir     string // absolute path to the images directory containing Dockerfiles
+	imagesRoot    string // absolute path to the images root holding <image>/Dockerfile
 	skillCacheDir string // absolute path to the cache of cloned git skills
 	defaultImage  string
 }
 
 // NewManager constructs a Manager. It connects to the Docker daemon using
 // environment variables (DOCKER_HOST, etc.) with API version negotiation.
-func NewManager(reposDir, workspacesDir, imagesDir, defaultImage string) (*Manager, error) {
+func NewManager(reposDir, workspacesDir, imagesRoot, defaultImage string) (*Manager, error) {
 	cli, err := client.NewClientWithOpts(
 		client.FromEnv,
 		client.WithAPIVersionNegotiation(),
@@ -63,7 +66,7 @@ func NewManager(reposDir, workspacesDir, imagesDir, defaultImage string) (*Manag
 		docker:        cli,
 		reposDir:      reposDir,
 		workspacesDir: workspacesDir,
-		imagesDir:     imagesDir,
+		imagesRoot:    imagesRoot,
 		// The skill cache lives alongside the workspace dir under data_path.
 		skillCacheDir: filepath.Join(filepath.Dir(workspacesDir), "skillcache"),
 		defaultImage:  defaultImage,
@@ -72,9 +75,11 @@ func NewManager(reposDir, workspacesDir, imagesDir, defaultImage string) (*Manag
 
 // CreateOptions holds parameters for workspace creation.
 type CreateOptions struct {
-	Name   string       // workspace name; must be unique
-	Image  string       // Docker image; falls back to defaultImage if empty
-	Assets ClaudeAssets // skills and MCP servers to seed into the workspace home
+	Name       string       // workspace name; must be unique
+	Image      string       // Docker image; falls back to defaultImage if empty
+	Dockerfile string       // optional inline Dockerfile content for Image (from a manifest)
+	Pull       bool         // allow fetching Image from a registry when not buildable
+	Assets     ClaudeAssets // skills and MCP servers to seed into the workspace home
 }
 
 // Create sets up the workspace directory structure and persists its configuration.
@@ -90,7 +95,14 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (WorkspaceConf
 		image = m.defaultImage
 	}
 
-	if err := m.ensureImage(ctx, image); err != nil {
+	// A manifest-provided Dockerfile is installed before resolving the image so
+	// it builds from the shared recipe rather than a registry.
+	if opts.Dockerfile != "" {
+		if err := m.installDockerfile(image, opts.Dockerfile); err != nil {
+			return WorkspaceConfig{}, err
+		}
+	}
+	if err := m.ensureImage(ctx, image, opts.Pull); err != nil {
 		return WorkspaceConfig{}, err
 	}
 
@@ -133,6 +145,10 @@ func (m *Manager) Shell(ctx context.Context, workspaceName string, repos []strin
 	}
 	cfg, err := m.Workspace(workspaceName)
 	if err != nil {
+		return "", err
+	}
+	// Rebuild the image if its Dockerfile changed since the workspace was created.
+	if err := m.ensureImage(ctx, cfg.Image, false); err != nil {
 		return "", err
 	}
 	if err := m.ensureRepos(ctx, repos); err != nil {
@@ -387,6 +403,28 @@ func (m *Manager) Duplicate(ctx context.Context, sourceName, destName string) (W
 	})
 }
 
+// SetImage changes the Docker image recorded for an existing workspace, ensuring
+// the new image is available first (built from its Dockerfile, or pulled when
+// pull is set). Existing sessions keep their current image; new sessions created
+// from this workspace use the new one.
+func (m *Manager) SetImage(ctx context.Context, workspaceName, image string, pull bool) (WorkspaceConfig, error) {
+	if image == "" {
+		return WorkspaceConfig{}, fmt.Errorf("image is required")
+	}
+	cfg, err := m.Workspace(workspaceName)
+	if err != nil {
+		return WorkspaceConfig{}, err
+	}
+	if err := m.ensureImage(ctx, image, pull); err != nil {
+		return WorkspaceConfig{}, err
+	}
+	cfg.Image = image
+	if err := writeWorkspaceConfig(cfg); err != nil {
+		return WorkspaceConfig{}, fmt.Errorf("write workspace config: %v", err)
+	}
+	return cfg, nil
+}
+
 // homeBind returns a single bind mount for the workspace's persistent home
 // directory. Mounting the whole home dir (rather than individual files like
 // .claude.json) avoids inode-pinning issues with atomic file rewrites.
@@ -412,20 +450,32 @@ func sshAgentConfig() (binds, env []string) {
 		[]string{"SSH_AUTH_SOCK=/run/ssh-agent.sock"}
 }
 
-// BuildImage builds the Docker image for imageName unconditionally.
+// labelContextSHA records the hash of the build context an image was built from,
+// so massrepo can detect when the Dockerfile/context has changed and rebuild.
+const labelContextSHA = "massrepo.context-sha"
+
+// BuildImage builds the Docker image for imageName unconditionally, using the
+// image's folder under the images root as the build context. The build context
+// hash is stamped onto the image as a label for change detection.
 func (m *Manager) BuildImage(ctx context.Context, imageName string) error {
-	dockerfile := m.dockerfileFor(imageName)
-	if dockerfile == "" {
-		return fmt.Errorf("image %q does not follow the massrepo-<name> naming convention", imageName)
+	dir, err := m.resolveImageDir(imageName)
+	if err != nil {
+		return err
 	}
-	if _, err := os.Stat(dockerfile); os.IsNotExist(err) {
-		return fmt.Errorf("no Dockerfile for %q at %s", imageName, dockerfile)
+	if dir == "" {
+		return fmt.Errorf("no Dockerfile for image %q under %s", imageName, m.imagesRoot)
 	}
+	sha, err := hashImageContext(dir)
+	if err != nil {
+		return err
+	}
+	dockerfile := filepath.Join(dir, "Dockerfile")
 	fmt.Printf("Building image %q from %s...\n", imageName, dockerfile)
 	cmd := exec.CommandContext(ctx, "docker", "build",
 		"-t", imageName,
 		"-f", dockerfile,
-		m.imagesDir,
+		"--label", labelContextSHA+"="+sha,
+		dir,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -435,36 +485,125 @@ func (m *Manager) BuildImage(ctx context.Context, imageName string) error {
 	return nil
 }
 
-// ensureImage builds imageName if it is not already present locally.
-// Non-massrepo image names are skipped.
-func (m *Manager) ensureImage(ctx context.Context, imageName string) error {
-	_, err := m.docker.ImageInspect(ctx, imageName)
-	if err == nil {
+// hashImageContext returns a deterministic hash over every file in the build
+// context directory (relative path + contents), used to detect changes.
+func hashImageContext(dir string) (string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files = append(files, p)
+		}
 		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("hash image context: %v", err)
 	}
-	if !cerrdefs.IsNotFound(err) {
+	sort.Strings(files)
+	h := sha256.New()
+	for _, p := range files {
+		rel, _ := filepath.Rel(dir, p)
+		fmt.Fprintf(h, "%s\x00", filepath.ToSlash(rel))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", fmt.Errorf("hash image context: %v", err)
+		}
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ensureImage makes imageName available locally without ever silently pulling
+// from a registry. It builds from a resolvable Dockerfile (on disk or embedded)
+// when the image is missing or when its build context has changed since it was
+// last built (detected via the labelContextSHA label). An up-to-date image is
+// used as-is. If the image is missing and not buildable, pull opts into a
+// registry fetch; otherwise a clear error is returned.
+func (m *Manager) ensureImage(ctx context.Context, imageName string, pull bool) error {
+	inspect, err := m.docker.ImageInspect(ctx, imageName)
+	present := err == nil
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("inspect image: %v", err)
 	}
-	if m.dockerfileFor(imageName) == "" {
-		return nil
+
+	dir, err := m.resolveImageDir(imageName)
+	if err != nil {
+		return err
+	}
+
+	if dir == "" {
+		// No Dockerfile to build from.
+		if present {
+			return nil
+		}
+		if pull {
+			return m.pullImage(ctx, imageName)
+		}
+		return fmt.Errorf("image %q is not present and has no Dockerfile under %s; pass --pull to fetch it from a registry",
+			imageName, m.imagesRoot)
+	}
+
+	if present {
+		// Rebuild only when the build context changed since the last build.
+		sha, err := hashImageContext(dir)
+		if err != nil {
+			return err
+		}
+		if inspect.Config != nil && inspect.Config.Labels[labelContextSHA] == sha {
+			return nil
+		}
+		fmt.Printf("Dockerfile for %q changed; rebuilding...\n", imageName)
 	}
 	return m.BuildImage(ctx, imageName)
 }
 
-// dockerfileFor maps an image name to its Dockerfile path inside imagesDir.
-// "massrepo-claude:latest" → "<imagesDir>/Dockerfile.claude"
-// Returns "" if the name does not match the expected convention.
-func (m *Manager) dockerfileFor(imageName string) string {
-	name := strings.SplitN(imageName, ":", 2)[0]
-	const prefix = "massrepo-"
-	if !strings.HasPrefix(name, prefix) {
-		return ""
+// pullImage fetches imageName from a registry via the docker CLI.
+func (m *Manager) pullImage(ctx context.Context, imageName string) error {
+	fmt.Printf("Pulling image %q...\n", imageName)
+	cmd := exec.CommandContext(ctx, "docker", "pull", imageName)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pull image %q: %v", imageName, err)
 	}
-	suffix := strings.TrimPrefix(name, prefix)
-	if suffix == "" {
-		return ""
+	return nil
+}
+
+// imageDirFor returns the build-context directory for imageName (its Dockerfile
+// lives at <dir>/Dockerfile). The tag is ignored.
+func (m *Manager) imageDirFor(imageName string) string {
+	return filepath.Join(m.imagesRoot, filepath.FromSlash(stripTag(imageName)))
+}
+
+// resolveImageDir returns the build-context directory for imageName, or "" if no
+// Dockerfile is available. An embedded default is materialized into the images
+// root on demand (without clobbering an existing on-disk Dockerfile).
+func (m *Manager) resolveImageDir(imageName string) (string, error) {
+	dir := m.imageDirFor(imageName)
+	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
+		return dir, nil
 	}
-	return filepath.Join(m.imagesDir, "Dockerfile."+suffix)
+	ok, err := materializeEmbeddedImage(imageName, dir)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return dir, nil
+	}
+	return "", nil
+}
+
+// installDockerfile writes content as the Dockerfile for imageName under the
+// images root (used when importing a manifest that carries an inline Dockerfile).
+func (m *Manager) installDockerfile(imageName, content string) error {
+	dir := m.imageDirFor(imageName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create image dir: %v", err)
+	}
+	return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0o644)
 }
 
 // createWorkspaceDirs creates the standard directory layout for a new workspace.

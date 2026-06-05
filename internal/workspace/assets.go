@@ -29,6 +29,7 @@ type ClaudeAssets struct {
 // stripped on export. See ExportManifest and ReadManifest.
 type Manifest struct {
 	Image      string               `yaml:"image,omitempty"`
+	Dockerfile string               `yaml:"dockerfile,omitempty"`
 	Skills     []SkillSource        `yaml:"skills,omitempty"`
 	MCPServers map[string]MCPServer `yaml:"mcp_servers,omitempty"`
 }
@@ -219,7 +220,13 @@ func (m *Manager) ExportManifest(workspaceName string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	return buildManifest(cfg), nil
+	man := buildManifest(cfg)
+	// Embed the image's Dockerfile (on-disk override or bundled default) so the
+	// image is rebuildable by the recipient.
+	if content, ok := m.dockerfileContent(cfg.Image); ok {
+		man.Dockerfile = content
+	}
+	return man, nil
 }
 
 // buildManifest derives a portable manifest from a workspace config, skipping
@@ -289,6 +296,9 @@ func ReadManifest(path string) (Manifest, error) {
 type ApplyOptions struct {
 	// Prune removes skills and MCP servers not present in the manifest.
 	Prune bool
+	// Pull allows fetching the manifest's image from a registry when it is not
+	// present locally and has no Dockerfile to build from.
+	Pull bool
 }
 
 // ApplyManifest updates an existing workspace from a manifest. By default it is
@@ -304,9 +314,16 @@ func (m *Manager) ApplyManifest(ctx context.Context, workspaceName string, man M
 		return err
 	}
 
-	// Adopt the manifest's image, building/pulling it if necessary.
-	if man.Image != "" && man.Image != cfg.Image {
-		if err := m.ensureImage(ctx, man.Image); err != nil {
+	// Adopt the manifest's image when it specifies one. A manifest-provided
+	// Dockerfile is installed and snapshotted so the image builds from the shared
+	// recipe rather than a registry.
+	if man.Image != "" {
+		if man.Dockerfile != "" {
+			if err := m.installDockerfile(man.Image, man.Dockerfile); err != nil {
+				return err
+			}
+		}
+		if err := m.ensureImage(ctx, man.Image, opts.Pull); err != nil {
 			return err
 		}
 		cfg.Image = man.Image
