@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -386,4 +387,73 @@ func TestWriteAndReadManifest(t *testing.T) {
 	got, err := ReadManifest(path)
 	require.NoError(t, err)
 	assert.Equal(t, man, got)
+}
+
+// initSkillRepo creates a git repository holding a single skill directory and
+// returns its path, usable as a clone source.
+func initSkillRepo(t *testing.T, skill string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-b", "main")
+	addSkillDir(t, dir, skill)
+	return dir
+}
+
+// addSkillDir adds a skill directory to a repository and commits it.
+func addSkillDir(t *testing.T, repoDir, skill string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, skill), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, skill, "SKILL.md"), []byte("# "+skill), 0o644))
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "add "+skill)
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
+}
+
+func TestFetchGitSkillRefreshesCachedClone(t *testing.T) {
+	ctx := context.Background()
+	origin := initSkillRepo(t, "one")
+	cacheDir := t.TempDir()
+
+	dir, err := fetchGitSkill(ctx, cacheDir, SkillSource{Git: origin, Ref: "main", Subdir: "one"})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dir, "SKILL.md"))
+
+	// A skill added to the ref after the clone was cached is picked up: the ref
+	// is mutable, so the cache must not be reused as-is.
+	addSkillDir(t, origin, "two")
+	dir, err = fetchGitSkill(ctx, cacheDir, SkillSource{Git: origin, Ref: "main", Subdir: "two"})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dir, "SKILL.md"))
+
+	// A subdir the ref really lacks is reported against the repo, not the cache.
+	_, err = fetchGitSkill(ctx, cacheDir, SkillSource{Git: origin, Ref: "main", Subdir: "three"})
+	require.ErrorContains(t, err, `subdir "three" not found`)
+}
+
+func TestIsCommitRef(t *testing.T) {
+	const head = "34a20d63e1c768ee456fe1f6bdfb11dc8f2b7af0"
+	for _, tt := range []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{name: "full sha", ref: head, want: true},
+		{name: "abbreviated sha", ref: "34a20d6", want: true},
+		{name: "uppercase sha", ref: "34A20D6", want: true},
+		{name: "branch", ref: "main", want: false},
+		{name: "short hex", ref: "34a20", want: false},
+		{name: "hex-looking branch", ref: "deadbeef", want: false},
+		{name: "other sha", ref: "0eba6b10", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCommitRef(head, tt.ref); got != tt.want {
+				t.Errorf("isCommitRef(%q, %q) = %v, want %v", head, tt.ref, got, tt.want)
+			}
+		})
+	}
 }

@@ -96,7 +96,7 @@ func (m *Manager) resolveSkill(ctx context.Context, src SkillSource) (string, er
 
 // fetchGitSkill clones a git-backed skill into the cache (keyed by repo+ref) and
 // returns the directory holding the skill (the optional subdir within the repo).
-// Cached clones are reused as-is.
+// A cached clone is refreshed to the tip of its ref before use.
 func fetchGitSkill(ctx context.Context, cacheDir string, src SkillSource) (string, error) {
 	if src.Ref == "" {
 		return "", fmt.Errorf("git skill %q: ref is required", src.Git)
@@ -104,7 +104,8 @@ func fetchGitSkill(ctx context.Context, cacheDir string, src SkillSource) (strin
 	key := sha256.Sum256([]byte(src.Git + "@" + src.Ref))
 	dest := filepath.Join(cacheDir, hex.EncodeToString(key[:])[:16])
 	if _, err := os.Stat(dest); err == nil {
-		return skillSubdir(dest, src.Subdir), nil
+		refreshGitSkill(ctx, src, dest)
+		return skillSubdir(dest, src)
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("create skill cache dir: %v", err)
@@ -122,7 +123,42 @@ func fetchGitSkill(ctx context.Context, cacheDir string, src SkillSource) (strin
 			return "", fmt.Errorf("clone git skill %q: %v", src.Git, err)
 		}
 	}
-	return skillSubdir(dest, src.Subdir), nil
+	return skillSubdir(dest, src)
+}
+
+// refreshGitSkill updates a cached clone to the current tip of its ref. Branches
+// and tags are mutable, so a clone cached before a skill was added to the ref
+// would otherwise stay stale forever. A ref naming the commit already checked
+// out is immutable and needs no fetch. A failed refresh is a warning, not an
+// error: the cached copy still works offline.
+func refreshGitSkill(ctx context.Context, src SkillSource, dest string) {
+	head, err := exec.CommandContext(ctx, "git", "-C", dest, "rev-parse", "HEAD").Output()
+	if err == nil && isCommitRef(strings.TrimSpace(string(head)), src.Ref) {
+		return
+	}
+	warn := func(err error) {
+		fmt.Fprintf(os.Stderr, "warning: refresh cached clone of %s@%s: %v; using cached copy\n", src.Git, src.Ref, err)
+	}
+	if _, err := runWithRateLimitRetry(ctx, src.Git, "git fetch", func(ctx context.Context) *exec.Cmd {
+		return exec.CommandContext(ctx, "git", "-C", dest, "fetch", "--depth", "1", "origin", src.Ref)
+	}); err != nil {
+		warn(err)
+		return
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", dest, "reset", "--hard", "FETCH_HEAD").CombinedOutput(); err != nil {
+		warn(fmt.Errorf("git reset: %v: %s", err, strings.TrimSpace(string(out))))
+	}
+}
+
+// isCommitRef reports whether ref names the given commit, i.e. it is a hex
+// prefix of head long enough to be an abbreviated SHA rather than a branch or
+// tag name that merely happens to look like one.
+func isCommitRef(head, ref string) bool {
+	const minAbbrev = 7
+	if len(ref) < minAbbrev || len(ref) > len(head) || !strings.HasPrefix(head, strings.ToLower(ref)) {
+		return false
+	}
+	return strings.Trim(strings.ToLower(ref), "0123456789abcdef") == ""
 }
 
 // cloneAndCheckout clones the full repository and checks out an arbitrary ref
@@ -139,12 +175,21 @@ func cloneAndCheckout(ctx context.Context, src SkillSource, dest string) error {
 	return nil
 }
 
-// skillSubdir joins an optional subdir onto a cloned repo directory.
-func skillSubdir(repoDir, subdir string) string {
-	if subdir == "" {
-		return repoDir
+// skillSubdir joins the source's optional subdir onto a cloned repo directory,
+// reporting a missing subdir against the repo and ref rather than against the
+// opaque cache path.
+func skillSubdir(repoDir string, src SkillSource) (string, error) {
+	dir := repoDir
+	if src.Subdir != "" {
+		dir = filepath.Join(repoDir, filepath.FromSlash(src.Subdir))
 	}
-	return filepath.Join(repoDir, filepath.FromSlash(subdir))
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("subdir %q not found in %s@%s", src.Subdir, src.Git, src.Ref)
+		}
+		return "", fmt.Errorf("skill subdir %q: %v", src.Subdir, err)
+	}
+	return dir, nil
 }
 
 // SkillName derives the directory name a skill is installed under, preferring a
